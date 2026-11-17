@@ -264,60 +264,74 @@ function countSolutions(b, limit = 2) {
   return cnt;
 }
 
-const GIVENS = { easy: 40, medium: 31, hard: 25, master: 22 };
+/* 难度按"解题要用到多深的技巧"分级，与当前引擎的技巧库对齐：
+   L1 唯一余数 / 唯一位置 · L2 裸/隐性数对三数组、区块/行列排除
+   L3 四数组、X-Wing/剑鱼、摩天楼、双线风筝、XY/XYZ-Wing · L4 水母、W-Wing、远程数对、单数链染色、唯一矩形、XY 链 */
+function techLevel(tech) {
+  if (tech.includes('唯一候选') || tech.includes('唯一位置')) return 1;
+  if (tech.includes('水母') || tech.includes('远程数对') || tech.includes('单数链染色') || tech.includes('唯一矩形') || tech.includes('XY 链') || tech.includes('W-Wing')) return 4;
+  if (tech.includes('四数组') || tech.includes('剑鱼') || tech.includes('摩天楼') || tech.includes('双线风筝') || tech.includes('Wing') || tech.includes('X-Wing')) return 3;
+  return 2;
+}
+
+// 难度体检：用提示引擎一路解完，统计每级技巧各用多少（getHint 定义在下方，函数声明会提升）
+function analyzeDifficulty(puzzle) {
+  const b = [...puzzle];
+  const a = { solvable: false, advanced: 0, highSteps: 0, maxLevel: 0, nakedSingles: 0, hiddenSingles: 0 };
+  for (let s = 0; s < 81; s++) {
+    if (b.every(v => v)) { a.solvable = true; return a; }
+    const h = getHint(b), last = h.steps && h.steps[h.steps.length - 1];
+    if (!h.ok || !last || !last.digit) return a;
+    for (const st of h.steps) {
+      const L = techLevel(st.tech);
+      a.maxLevel = Math.max(a.maxLevel, L);
+      if (st.digit) { if (st.tech.includes('唯一候选')) a.nakedSingles++; else a.hiddenSingles++; }
+      else { a.advanced++; if (L >= 3) a.highSteps++; }
+    }
+    b[last.cell] = last.digit;
+  }
+  a.solvable = b.every(v => v);
+  return a;
+}
+
+/* 四档标准（target 为挖空目标；大师挖到删无可删）：
+   简单 只用唯一余数 · 中等 唯一余数+唯一位置 · 困难 必须用 L2、但用不到 L3 · 大师 至少 5 次排除且至少 2 次 L3+ */
+const DIFFS = {
+  easy:   { label:'简单', target: 40, budget: 1500, pass: a => a.maxLevel <= 1 && a.hiddenSingles === 0,
+            score: a => -a.hiddenSingles * 10 - a.advanced * 100, desc: '只靠「唯一余数」就能解完' },
+  medium: { label:'中等', target: 31, budget: 2500, pass: a => a.maxLevel <= 1 && a.hiddenSingles >= 3,
+            score: a => a.hiddenSingles * 10 - a.advanced * 100, desc: '需要「唯一余数 + 唯一位置」配合' },
+  hard:   { label:'困难', target: 25, budget: 4000, pass: a => a.advanced >= 1 && a.maxLevel <= 2,
+            score: a => (a.maxLevel <= 2 ? 0 : -5000) + a.advanced * 100, desc: '需要数对、区块排除等基础高级技巧' },
+  master: { label:'大师', target: 17, budget: 4000, pass: a => a.advanced >= 5 && a.highSteps >= 2,
+            score: a => a.highSteps * 1000 + a.advanced * 50, desc: '需要 X-Wing、剑鱼、XY-Wing 等高级技巧多次配合' },
+};
+
 function genPuzzle(diff) {
-  let fallback = null, best = null, bestScore = -1;
-  const master = diff === 'master', target = master ? 17 : GIVENS[diff]; // 大师：删到删无可删，再按解法难度挑
+  const spec = DIFFS[diff];
+  let fallback = null, best = null, bestScore = -Infinity;
   const t0 = Date.now();
-  for (let attempt = 0; attempt < (master ? 25 : 30); attempt++) {
-    if (master && best && Date.now() - t0 > 4000) break; // 别让挑题拖太久，用已找到的最难的
+  for (let attempt = 0; attempt < 40; attempt++) {
+    if (best && Date.now() - t0 > spec.budget) break; // 挑题别拖太久，用已找到的最贴合的
     const sol = genSolution(), b = [...sol];
     fallback = b;
     let left = 81, progress = true;
-    while (left > target && progress) { // 多趟删除：一趟删不动的，换个顺序再试
+    while (left > spec.target && progress) { // 多趟删除：一趟删不动的，换个顺序再试
       progress = false;
       for (const i of shuffled([...Array(81).keys()])) {
-        if (left <= target) break;
+        if (left <= spec.target) break;
         if (!b[i]) continue;
         const bak = b[i]; b[i] = 0;
         if (countSolutions([...b]) !== 1) b[i] = bak; else { left--; progress = true; }
       }
     }
-    if (!master) { if (isLogicallySolvable(b)) return b; continue; }
-    // 大师门槛：逻辑可解，且全程至少用到 5 次高级排除——只靠唯一余数/唯一位置能点完的一律不要
     const a = analyzeDifficulty(b);
-    if (!a.solvable) continue;
-    if (!best) best = b;
-    const score = a.advanced * 100 - left;
-    if (a.advanced >= 5) return b;
+    if (!a.solvable) continue; // 保证提示引擎全程推得出下一步
+    if (spec.pass(a)) return b;
+    const score = spec.score(a) - left;
     if (score > bestScore) { best = b; bestScore = score; }
   }
   return best || fallback;
-}
-// 只用提示引擎的逻辑技巧能否一路解完（getHint 定义在下方，函数声明会提升）
-function isLogicallySolvable(puzzle) {
-  const b = [...puzzle];
-  for (let s = 0; s < 81; s++) {
-    if (b.every(v => v)) return true;
-    const h = getHint(b), last = h.steps && h.steps[h.steps.length - 1];
-    if (!h.ok || !last || !last.digit) return false;
-    b[last.cell] = last.digit;
-  }
-  return b.every(v => v);
-}
-
-// 难度体检：用提示引擎一路解完，数用了多少次"高级排除"（唯一余数/唯一位置之外的技巧）
-function analyzeDifficulty(puzzle) {
-  const b = [...puzzle];
-  let advanced = 0;
-  for (let s = 0; s < 81; s++) {
-    if (b.every(v => v)) return { solvable: true, advanced };
-    const h = getHint(b), last = h.steps && h.steps[h.steps.length - 1];
-    if (!h.ok || !last || !last.digit) return { solvable: false, advanced };
-    advanced += h.steps.filter(st => !st.digit).length;
-    b[last.cell] = last.digit;
-  }
-  return { solvable: b.every(v => v), advanced };
 }
 
 /* ================= 逻辑提示引擎 =================
@@ -763,7 +777,7 @@ function newGame() {
   clearInterval(timerId);
   timerId = setInterval(() => { seconds++; tick(); }, 1000);
   tick(); render();
-  setStatus('点选一个格子，再点下方数字填入');
+  setStatus(`${DIFFS[diff].label} · ${board.filter(Boolean).length} 个提示数 · ${DIFFS[diff].desc}`);
 }
 function tick() { $('timer').textContent = `${String(seconds/60|0).padStart(2,'0')}:${String(seconds%60).padStart(2,'0')}`; }
 function setStatus(t, bad) { statusEl.textContent = t; statusEl.className = bad ? 'bad' : ''; }
@@ -822,7 +836,7 @@ function afterMove() {
   if (conflicts.size) { setStatus('有重复数字冲突，已标红，改掉它们再继续', true); return; }
   if (board.every(v => v)) {
     over = true; clearInterval(timerId);
-    $('winText').textContent = `难度：${{easy:'简单',medium:'中等',hard:'困难',master:'大师'}[diff]} · 用时 ${$('timer').textContent}`;
+    $('winText').textContent = `难度：${DIFFS[diff].label} · 用时 ${$('timer').textContent}`;
     $('win').classList.add('show');
   } else setStatus('点选一个格子，再点下方数字填入');
 }
@@ -889,7 +903,7 @@ $('checkBtn').addEventListener('click', () => {
   render();
 });
 function queueNewGame() { // 大师出题要挑题，先把提示文字画出来再同步生成，免得像卡死
-  if (diff === 'master') setStatus('正在挑一道必须用高级技巧的大师题，稍等…');
+  if (diff === 'hard' || diff === 'master') setStatus(`正在挑一道符合「${DIFFS[diff].label}」标准的题，稍等…`);
   setTimeout(newGame, 30);
 }
 $('newBtn').addEventListener('click', queueNewGame);
