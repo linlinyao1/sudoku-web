@@ -322,7 +322,8 @@ function analyzeDifficulty(puzzle) {
 
 /* ================= 逻辑提示引擎 =================
    只根据当前盘面已填数字做逻辑推理，绝不查解盘、绝不猜测/穷举试错。
-   技巧链：唯一候选 → 单元唯一位置 → 裸/隐性数组、区块排除、行列排除、X-Wing、剑鱼、XY-Wing
+   技巧链：唯一候选 → 单元唯一位置 → 裸/隐性数组、区块排除、行列排除、X-Wing、剑鱼、水母、
+   摩天楼、双线风筝、XY-Wing、XYZ-Wing、W-Wing、远程数对、单数链染色、唯一矩形、XY 链
    后几类先做"排除"，排除后若逼出唯一候选，再把完整链条讲出来。 */
 function deriveCandidates(board) {
   return board.map((v, i) => v ? null :
@@ -371,8 +372,8 @@ function findElimination(board, cands) {
         cells, rel: u.cells.filter(i => cands[i] && !cells.includes(i)), elims };
     }
   }
-  // 隐性数对 / 隐性三数组：k 个数字在单元里合计只能落在 k 个格子 → 这 k 格的其他候选删掉
-  for (const k of [2, 3]) for (const u of UNITS) {
+  // 隐性数组：k 个数字在单元里合计只能落在 k 个格子 → 这 k 格的其他候选删掉
+  for (const k of [2, 3, 4]) for (const u of UNITS) {
     const present = ALL.filter(d => !u.cells.some(i => board[i] === d) && u.cells.some(i => cands[i] && cands[i].has(d)));
     for (const ds of combos(present, k)) {
       const spots = u.cells.filter(i => cands[i] && ds.some(d => cands[i].has(d)));
@@ -380,8 +381,8 @@ function findElimination(board, cands) {
       const elims = [];
       spots.forEach(i => [...cands[i]].forEach(d => { if (!ds.includes(d)) elims.push({ i, d }); }));
       if (elims.length) return {
-        tech: k === 2 ? '隐性数对（Hidden Pair）' : '隐性三数组（Hidden Triple）',
-        text: `看${unitName(u)}：数字 ${ds.join(' 和 ')} 在这个${u.type}里翻来覆去只能落在 ${spots.map(rcName).join('、')} 这${k}个格子。\n既然这${k}个数字必须占住这${k}个格子，这几格就不可能再是其他数字，把它们多余的候选划掉。`,
+        tech: ['','', '隐性数对（Hidden Pair）', '隐性三数组（Hidden Triple）', '隐性四数组（Hidden Quad）'][k],
+        text: `看${unitName(u)}：数字 {${ds.join(', ')}} 在这个${u.type}里翻来覆去只能落在 ${spots.map(rcName).join('、')} 这${k}个格子。\n既然这${k}个数字必须占住这${k}个格子，这几格就不可能再是其他数字，把它们多余的候选划掉。`,
         cells: spots, rel: elims.map(e => e.i), elims };
     }
   }
@@ -440,25 +441,25 @@ function findElimination(board, cands) {
         rel: elims.map(e => e.i), elims };
     }
   }
-  // 剑鱼（Swordfish）：某数字在三行里合计只能落在相同三列 → 这三列其他行删掉它（行/列两个方向）
-  for (const byRow of [true, false]) for (const d of ALL) {
+  // 剑鱼 / 水母（Swordfish / Jellyfish）：某数字在 k 条线里合计只能落在相同 k 条交叉线 → 交叉线其他位置删掉它
+  for (const size of [3, 4]) for (const byRow of [true, false]) for (const d of ALL) {
     const lines = [];
     for (let a = 0; a < 9; a++) {
       const pos = [];
       for (let b = 0; b < 9; b++) { const i = byRow ? idx(a, b) : idx(b, a); if (cands[i] && cands[i].has(d)) pos.push(b); }
-      if (pos.length >= 2 && pos.length <= 3) lines.push({ a, pos });
+      if (pos.length >= 2 && pos.length <= size) lines.push({ a, pos });
     }
-    for (const trio of combos(lines, 3)) {
-      const cross = [...new Set(trio.flatMap(l => l.pos))];
-      if (cross.length !== 3) continue;
-      const base = new Set(trio.map(l => l.a)), elims = [], cells = [];
-      trio.forEach(l => l.pos.forEach(b => cells.push(byRow ? idx(l.a, b) : idx(b, l.a))));
+    for (const group of combos(lines, size)) {
+      const cross = [...new Set(group.flatMap(l => l.pos))];
+      if (cross.length !== size) continue;
+      const base = new Set(group.map(l => l.a)), elims = [], cells = [];
+      group.forEach(l => l.pos.forEach(b => cells.push(byRow ? idx(l.a, b) : idx(b, l.a))));
       for (let a = 0; a < 9; a++) if (!base.has(a)) cross.forEach(b => {
         const i = byRow ? idx(a, b) : idx(b, a); if (cands[i] && cands[i].has(d)) elims.push({ i, d });
       });
       if (elims.length) return {
-        tech: '剑鱼（Swordfish）',
-        text: `看数字 ${d}：它在第${trio.map(l => l.a + 1).join('、')}这三${byRow ? '行' : '列'}里，每${byRow ? '行' : '列'}最多落在 ${cross.map(v => `第${v + 1}${byRow ? '列' : '行'}`).join('、')} 这三处，构成"剑鱼"。\n这三${byRow ? '列' : '行'}的 ${d} 必被这三${byRow ? '行' : '列'}占掉，所以其他${byRow ? '行' : '列'}在三${byRow ? '列' : '行'}交点上的格子不可能是 ${d}，划掉。`,
+        tech: size === 3 ? '剑鱼（Swordfish）' : '水母（Jellyfish）',
+        text: `看数字 ${d}：它在第${group.map(l => l.a + 1).join('、')}这${size}${byRow ? '行' : '列'}里，每条线最多落在 ${cross.map(v => `第${v + 1}${byRow ? '列' : '行'}`).join('、')} 这${size}处，构成"${size === 3 ? '剑鱼' : '水母'}"。\n这${size}条交叉线的 ${d} 必被这${size}条线占掉，所以交叉线其他位置上的格子不可能是 ${d}，划掉。`,
         cells, rel: elims.map(e => e.i), elims };
     }
   }
@@ -479,6 +480,202 @@ function findElimination(board, cands) {
         tech: 'XY-Wing',
         text: `找到一组 XY-Wing：枢纽格 ${rcName(p)} 只能是 ${x} 或 ${y}；它的两个"翅膀" ${rcName(w1)}（候选 ${a.join('/') }）和 ${rcName(w2)}（候选 ${b.join('/') }）都能看见枢纽。\n分情况想：如果枢纽是 ${x}，一侧翅膀就被逼成 ${z}；如果枢纽是 ${y}，另一侧翅膀被逼成 ${z}。无论哪种情况，总有一个翅膀是 ${z}。\n所以同时能看见两个翅膀的格子绝不可能是 ${z}，把它们的候选 ${z} 划掉。`,
         cells: [p, w1, w2], rel: elims.map(e => e.i), elims };
+    }
+  }
+  // 摩天楼（Skyscraper）：某数字在两行都只剩两处且共享一列 → 两行另一端的共同可见格删掉它
+  for (const byRow of [true, false]) for (const d of ALL) {
+    const lines = [];
+    for (let a = 0; a < 9; a++) {
+      const pos = [];
+      for (let b = 0; b < 9; b++) { const i = byRow ? idx(a, b) : idx(b, a); if (cands[i] && cands[i].has(d)) pos.push(b); }
+      if (pos.length === 2) lines.push({ a, pos });
+    }
+    for (let i = 0; i < lines.length; i++) for (let j = i + 1; j < lines.length; j++) {
+      const shared = lines[i].pos.filter(b => lines[j].pos.includes(b));
+      if (shared.length !== 1) continue;
+      const e1 = byRow ? idx(lines[i].a, lines[i].pos.find(b => b !== shared[0])) : idx(lines[i].pos.find(b => b !== shared[0]), lines[i].a);
+      const e2 = byRow ? idx(lines[j].a, lines[j].pos.find(b => b !== shared[0])) : idx(lines[j].pos.find(b => b !== shared[0]), lines[j].a);
+      const peers2 = new Set(peersOf(e2)), elims = [];
+      peersOf(e1).forEach(v => { if (v !== e1 && v !== e2 && peers2.has(v) && cands[v] && cands[v].has(d)) elims.push({ i: v, d }); });
+      if (elims.length) return {
+        tech: '摩天楼（Skyscraper）',
+        text: `看数字 ${d}：第${lines[i].a + 1}${byRow ? '行' : '列'}和第${lines[j].a + 1}${byRow ? '行' : '列'}里它都只剩两处，且两条线在第${shared[0] + 1}${byRow ? '列' : '行'}对齐（楼底）。\n两条线各要放一个 ${d}，楼底最多容一个，所以两个"楼顶"（${rcName(e1)}、${rcName(e2)}）至少有一个是 ${d}。\n因此同时能看见两个楼顶的格子不可能是 ${d}，划掉。`,
+        cells: [e1, e2], rel: elims.map(e => e.i), elims };
+    }
+  }
+  // 双线风筝（Two-String Kite）：一行与一列各只剩两处放某数字，且一端在同一宫相接 → 另一端的交点格删掉它
+  for (const d of ALL) {
+    const rowPairs = [], colPairs = [];
+    for (let r = 0; r < 9; r++) { const cs = []; for (let c = 0; c < 9; c++) if (cands[idx(r, c)] && cands[idx(r, c)].has(d)) cs.push(c); if (cs.length === 2) rowPairs.push({ r, cs }); }
+    for (let c = 0; c < 9; c++) { const rs = []; for (let r = 0; r < 9; r++) if (cands[idx(r, c)] && cands[idx(r, c)].has(d)) rs.push(r); if (rs.length === 2) colPairs.push({ c, rs }); }
+    for (const rp of rowPairs) for (const cp of colPairs) for (const rc of rp.cs) for (const rr of cp.rs) {
+      const a = idx(rp.r, rc), b = idx(rr, cp.c);
+      if (a === b) continue; // 两根线必须落在同宫的两个不同格子；共用一格时结论不成立
+      if (boxOf(a / 9 | 0, a % 9) !== boxOf(b / 9 | 0, b % 9)) continue;
+      const oc = rp.cs.find(v => v !== rc), orow = cp.rs.find(v => v !== rr), victim = idx(orow, oc);
+      const ends = [a, b, idx(rp.r, oc), idx(orow, cp.c)];
+      if (ends.includes(victim) || !cands[victim] || !cands[victim].has(d)) continue; // 被排除格不能是风筝自身的格子
+      return { tech: '双线风筝（Two-String Kite）',
+        text: `看数字 ${d}：第${rp.r + 1}行里它只剩两处、第${cp.c + 1}列里也只剩两处，且两条线的各一端落在同一个宫里"接"上了（风筝的两根线）。\n沿线推：两根线的自由端（${rcName(idx(rp.r, oc))} 与 ${rcName(idx(orow, cp.c))}）至少有一个是 ${d}，而 ${rcName(victim)} 同时能看见这两个自由端，所以它不可能是 ${d}，划掉。`,
+        cells: [...new Set(ends)], rel: [victim], elims: [{ i: victim, d }] };
+    }
+  }
+  // XYZ-Wing：枢纽格 {x,y,z} + 两翼 {x,z}、{y,z} → 同时看见三者的格删掉 z
+  for (let p = 0; p < 81; p++) {
+    if (!cands[p] || cands[p].size !== 3) continue;
+    const pv = [...cands[p]], pset = new Set(peersOf(p));
+    const wings = peersOf(p).filter(i => cands[i] && cands[i].size === 2 && [...cands[i]].every(d => pv.includes(d)));
+    for (const w1 of wings) for (const w2 of wings) {
+      if (w2 <= w1) continue;
+      const common = [...cands[w1]].filter(d => cands[w2].has(d));
+      if (common.length !== 1) continue;
+      const z = common[0], w2set = new Set(peersOf(w2)), elims = [];
+      peersOf(w1).forEach(v => { if (v !== p && v !== w1 && v !== w2 && pset.has(v) && w2set.has(v) && cands[v] && cands[v].has(z)) elims.push({ i: v, d: z }); });
+      if (elims.length) return {
+        tech: 'XYZ-Wing',
+        text: `找到 XYZ-Wing：枢纽格 ${rcName(p)} 有三个候选 {${pv.join(', ')}}，两翼 ${rcName(w1)}、${rcName(w2)} 分别是 {${[...cands[w1]].join(', ')}}、{${[...cands[w2]].join(', ')}}，都能看见枢纽。\n无论枢纽最后是哪个数，枢纽与两翼这三格里总有一格是 ${z}。所以同时能看见这三格的格子不可能是 ${z}，划掉。`,
+        cells: [p, w1, w2], rel: elims.map(e => e.i), elims };
+    }
+  }
+  // W-Wing：两个不互相看见的同对双值格，被一对关于某数字的强链间接相连 → 共同可见格删掉另一个数字
+  {
+    const biv = [];
+    for (let i = 0; i < 81; i++) if (cands[i] && cands[i].size === 2) biv.push(i);
+    const strongPairs = d => {
+      const pairs = [];
+      for (const u of UNITS) { const s = u.cells.filter(i => cands[i] && cands[i].has(d)); if (s.length === 2) pairs.push(s); }
+      return pairs;
+    };
+    for (const p of biv) for (const q of biv) {
+      if (q <= p) continue;
+      const pv = [...cands[p]];
+      if ([...cands[q]].join() !== [...cands[p]].sort().join() && [...cands[q]].sort().join() !== pv.sort().join()) continue;
+      if (peersOf(p).includes(q)) continue;
+      for (const link of pv) {
+        const other = pv.find(d => d !== link);
+        for (const [a, b] of strongPairs(link)) {
+          const sees = (u, v) => peersOf(u).includes(v);
+          if (!((sees(a, p) && sees(b, q)) || (sees(a, q) && sees(b, p)))) continue;
+          if (a === p || a === q || b === p || b === q) continue;
+          const qset = new Set(peersOf(q)), elims = [];
+          peersOf(p).forEach(v => { if (v !== p && v !== q && v !== a && v !== b && qset.has(v) && cands[v] && cands[v].has(other)) elims.push({ i: v, d: other }); });
+          if (elims.length) return {
+            tech: 'W-Wing',
+            text: `${rcName(p)} 与 ${rcName(q)} 都是双值格 {${pv.join(', ')}}（W-Wing 的两端）。${rcName(a)} 与 ${rcName(b)} 之间有一条关于 ${link} 的强链：它所在的单元里 ${link} 只剩这两处，必有一处是 ${link}，且两处分别能看见两端。\n假设某个同时看见两端的格子是 ${other}，两端就都被逼成 ${link}；再沿强链推，必有一端其实不是 ${link}——矛盾。所以这样的格子不可能是 ${other}，划掉。`,
+            cells: [p, q, a, b], rel: elims.map(e => e.i), elims };
+        }
+      }
+    }
+  }
+  // 远程数对（Remote Pairs）：一串相同的双值格首尾相连成链 → 同时看见链上异色两格的格子，两个候选都删
+  {
+    const groups = new Map();
+    for (let i = 0; i < 81; i++) if (cands[i] && cands[i].size === 2) {
+      const key = [...cands[i]].sort().join('');
+      groups.set(key, [...(groups.get(key) || []), i]);
+    }
+    for (const [key, cells] of groups) {
+      if (cells.length < 4) continue;
+      const ds = [...key].map(Number), inGroup = new Set(cells), seen = new Set();
+      for (const start of cells) {
+        if (seen.has(start)) continue;
+        const color = new Map([[start, 0]]), queue = [start]; seen.add(start);
+        while (queue.length) { const cur = queue.shift(); peersOf(cur).forEach(n => { if (inGroup.has(n) && !color.has(n)) { color.set(n, 1 - color.get(cur)); seen.add(n); queue.push(n); } }); }
+        if (color.size < 4) continue;
+        const colored = [...color.keys()], elims = [];
+        for (let v = 0; v < 81; v++) {
+          if (!cands[v] || inGroup.has(v)) continue;
+          const vp = new Set(peersOf(v)), has0 = colored.some(i => color.get(i) === 0 && vp.has(i)), has1 = colored.some(i => color.get(i) === 1 && vp.has(i));
+          if (has0 && has1) ds.forEach(d => { if (cands[v].has(d)) elims.push({ i: v, d }); });
+        }
+        if (elims.length) return {
+          tech: '远程数对（Remote Pairs）',
+          text: `有一串候选同为 {${ds.join(', ')}} 的双值格互相"看得见"、连成一条链（${colored.map(rcName).join(' → ')} 的可见关系）。链上相邻两格必然一格是 ${ds[0]}、一格是 ${ds[1]}，沿链交替。\n把链交替染成两色：同色格取值相同、异色格取值相反。任何格子若同时看见一格红色和一格蓝色，那两格一个是 ${ds[0]}、一个是 ${ds[1]}，所以它两个数都不可能是，划掉。`,
+          cells: colored, rel: [...new Set(elims.map(e => e.i))], elims };
+      }
+    }
+  }
+  // 单数链染色（Simple Coloring）：某数字的强链交替染色，同色相见或一格同见异色 → 排除
+  for (const d of ALL) {
+    const nodes = [];
+    for (let i = 0; i < 81; i++) if (cands[i] && cands[i].has(d)) nodes.push(i);
+    const adj = new Map(nodes.map(i => [i, new Set()]));
+    for (const u of UNITS) {
+      const s = u.cells.filter(i => cands[i] && cands[i].has(d));
+      if (s.length === 2) { adj.get(s[0]).add(s[1]); adj.get(s[1]).add(s[0]); }
+    }
+    const visited = new Set();
+    for (const start of nodes) {
+      if (visited.has(start) || !adj.get(start).size) continue;
+      const color = new Map([[start, 0]]), queue = [start]; visited.add(start);
+      while (queue.length) { const cur = queue.shift(); adj.get(cur).forEach(n => { if (!color.has(n)) { color.set(n, 1 - color.get(cur)); visited.add(n); queue.push(n); } }); }
+      if (color.size < 4) continue;
+      const colored = [...color.keys()];
+      for (const col of [0, 1]) { // 规则一：同色两格互相看得见 → 这一色全假
+        const same = colored.filter(i => color.get(i) === col);
+        const clash = same.some((a, x) => same.some((b, y) => y > x && peersOf(a).includes(b)));
+        if (clash) return {
+          tech: '单数链染色（Simple Coloring）',
+          text: `只盯数字 ${d}：把"某单元里只剩两处能放 ${d}"的格子两两连成强链，沿链交替染色。结果发现有两格同色却互相看得见——同色的格子取值必然相同（要么全是 ${d}），可它们同处一个单元又不能同为 ${d}，说明这一色全是假的。\n所以这一色的格子都不可能是 ${d}，划掉。`,
+          cells: same, rel: same, elims: same.map(i => ({ i, d })) };
+      }
+      const elims = []; // 规则二：一格同时看见异色两格
+      for (const v of nodes) {
+        if (color.has(v)) continue;
+        const vp = new Set(peersOf(v));
+        if (colored.some(i => color.get(i) === 0 && vp.has(i)) && colored.some(i => color.get(i) === 1 && vp.has(i))) elims.push({ i: v, d });
+      }
+      if (elims.length) return {
+        tech: '单数链染色（Simple Coloring）',
+        text: `只盯数字 ${d}：把"某单元里只剩两处能放 ${d}"的格子两两连成强链并交替染色。链上异色两格必然一真一假（有一个是 ${d}）。\n有些格子同时能看见一红一蓝两格——无论哪色为真，它都会撞上一个 ${d}，所以它自己不可能是 ${d}，划掉。`,
+        cells: colored, rel: elims.map(e => e.i), elims };
+    }
+  }
+  // 唯一矩形 Type 1（Unique Rectangle）：矩形四角三格同为 {x,y}，第四格含 x/y 及其他数 → 第四格删 x/y
+  for (let r1 = 0; r1 < 9; r1++) for (let r2 = r1 + 1; r2 < 9; r2++) for (let c1 = 0; c1 < 9; c1++) for (let c2 = c1 + 1; c2 < 9; c2++) {
+    const corners = [idx(r1, c1), idx(r1, c2), idx(r2, c1), idx(r2, c2)];
+    if (new Set(corners.map(i => boxOf(i / 9 | 0, i % 9))).size !== 2) continue;
+    if (corners.some(i => !cands[i])) continue;
+    for (const fourth of corners) {
+      const rest = corners.filter(i => i !== fourth);
+      if (!rest.every(i => cands[i].size === 2)) continue;
+      const pair = [...cands[rest[0]]].sort().join();
+      if (!rest.every(i => [...cands[i]].sort().join() === pair)) continue;
+      const ds = [...cands[rest[0]]];
+      if (!(cands[fourth].size > 2 && ds.every(d => cands[fourth].has(d)))) continue;
+      return { tech: '唯一矩形（Unique Rectangle）',
+        text: `${corners.map(rcName).join('、')} 四格构成一个跨两个宫的矩形，其中三格候选都恰好是 {${ds.join(', ')}}。\n本题保证唯一解：如果第四格 ${rcName(fourth)} 也只剩 {${ds.join(', ')}}，矩形四角就能 ${ds[0]}/${ds[1]} 互换出另一个解，与唯一解矛盾。\n所以第四格不可能是 ${ds.join(' 或 ')}，把这两个候选划掉，只留其余候选。`,
+        cells: rest, rel: [fourth], elims: ds.map(d => ({ i: fourth, d })) };
+    }
+  }
+  // XY 链（XY-Chain）：双值格首尾相扣成链，两端共享一个数字 → 共同可见格删掉该数字
+  {
+    const biv = new Set();
+    for (let i = 0; i < 81; i++) if (cands[i] && cands[i].size === 2) biv.add(i);
+    const search = (start, z) => {
+      const dfs = (cur, linkIn, path) => {
+        const out = [...cands[cur]].find(d => d !== linkIn);
+        if (path.length >= 4 && out === z) {
+          const end = cur, eset = new Set(peersOf(end)), elims = [];
+          peersOf(start).forEach(v => { if (!path.includes(v) && eset.has(v) && cands[v] && cands[v].has(z)) elims.push({ i: v, d: z }); });
+          if (elims.length) return { path: [...path], end, elims };
+        }
+        if (path.length >= 8) return null;
+        for (const n of peersOf(cur)) {
+          if (!biv.has(n) || path.includes(n) || !cands[n].has(out)) continue;
+          const hit = dfs(n, out, [...path, n]);
+          if (hit) return hit;
+        }
+        return null;
+      };
+      return dfs(start, z, [start]);
+    };
+    for (const start of biv) for (const z of [...cands[start]]) {
+      const hit = search(start, z);
+      if (hit) return {
+        tech: 'XY 链（XY-Chain）',
+        text: `找到一条 XY 链：${hit.path.map(rcName).join(' → ')}，每格都是双值格、相邻两格共享一个候选，环环相扣。\n链的一端 ${rcName(start)} 含数字 ${z}，另一端 ${rcName(hit.end)} 也含 ${z}。沿链推理：无论从哪头开始取舍，总有一端最终是 ${z}（链会把取值一路"逼"过去）。\n所以同时能看见链两端的格子不可能是 ${z}，划掉。`,
+        cells: hit.path, rel: hit.elims.map(e => e.i), elims: hit.elims };
     }
   }
   return null;
@@ -537,7 +734,7 @@ function getHint(board) {
     hit = hiddenSingle(board, cands);
     if (hit) { steps.push(explainHidden(board, cands, hit)); return { ok:true, steps }; }
   }
-  return { ok:false, msg:'当前盘面用已内置的逻辑技巧（唯一候选、唯一位置、裸/隐性数组、区块排除、X-Wing、剑鱼、XY-Wing）暂时推不出确定的一步。\n建议先把每个空格的候选都标全，再点提示；或者换个区域看看。放心，我不会用猜测或试错来蒙一个答案给你。', steps };
+  return { ok:false, msg:'当前盘面用已内置的逻辑技巧（唯一候选、唯一位置、裸/隐性数组、区块排除、X-Wing、剑鱼、水母、摩天楼、双线风筝、XY/XYZ-Wing、W-Wing、远程数对、单数链染色、唯一矩形、XY 链）暂时推不出确定的一步。\n建议先把每个空格的候选都标全，再点提示；或者换个区域看看。放心，我不会用猜测或试错来蒙一个答案给你。', steps };
 }
 
 function findConflicts(board) {
