@@ -1,0 +1,737 @@
+'use strict';
+/* ================= 数独核心 ================= */
+const N = 9;
+const idx = (r, c) => r * 9 + c;
+const boxOf = (r, c) => ((r / 3) | 0) * 3 + ((c / 3) | 0);
+const ALL = [1,2,3,4,5,6,7,8,9];
+
+// 27 个单元（行/列/宫），每单元 9 个格子下标
+const UNITS = [];
+for (let i = 0; i < 9; i++) {
+  UNITS.push({ type:'行', n:i+1, cells: ALL.map(c => idx(i, c-1)) });
+  UNITS.push({ type:'列', n:i+1, cells: ALL.map(r => idx(r-1, i)) });
+}
+for (let b = 0; b < 9; b++) {
+  const r0 = ((b / 3) | 0) * 3, c0 = (b % 3) * 3, cells = [];
+  for (let dr = 0; dr < 3; dr++) for (let dc = 0; dc < 3; dc++) cells.push(idx(r0+dr, c0+dc));
+  UNITS.push({ type:'宫', n:b+1, cells });
+}
+const unitName = u => `第${u.n}${u.type}`;
+const rcName = i => `第${(i/9|0)+1}行第${i%9+1}列`;
+
+// 同行/同列/同宫的伙伴格
+function peersOf(i) {
+  const r = i/9|0, c = i%9, s = new Set();
+  for (let k = 0; k < 9; k++) { s.add(idx(r,k)); s.add(idx(k,c)); }
+  const r0 = (r/3|0)*3, c0 = (c/3|0)*3;
+  for (let dr = 0; dr < 3; dr++) for (let dc = 0; dc < 3; dc++) s.add(idx(r0+dr, c0+dc));
+  s.delete(i); return [...s];
+}
+
+function shuffled(a) { a = [...a]; for (let i = a.length-1; i > 0; i--) { const j = Math.random()*(i+1)|0; [a[i],a[j]] = [a[j],a[i]]; } return a; }
+
+// 回溯生成完整解盘（仅用于出题，提示引擎绝不看解盘）
+function genSolution() {
+  const b = new Array(81).fill(0);
+  (function bt(p) {
+    if (p === 81) return true;
+    for (const v of shuffled(ALL)) {
+      const r = p/9|0, c = p%9;
+      if (peersOf(p).every(q => b[q] !== v)) { b[p] = v; if (bt(p+1)) return true; b[p] = 0; }
+    }
+    return false;
+  })(0);
+  return b;
+}
+
+// 统计解的个数（上限 2），用于保证题目唯一解
+function countSolutions(b, limit = 2) {
+  let cnt = 0;
+  (function bt() {
+    if (cnt >= limit) return;
+    let best = -1, bestOpts = null;
+    for (let i = 0; i < 81; i++) if (!b[i]) {
+      const used = new Set(peersOf(i).map(q => b[q]));
+      const opts = ALL.filter(v => !used.has(v));
+      if (!opts.length) return;
+      if (!bestOpts || opts.length < bestOpts.length) { best = i; bestOpts = opts; if (opts.length === 1) break; }
+    }
+    if (best === -1) { cnt++; return; }
+    for (const v of bestOpts) { b[best] = v; bt(); b[best] = 0; if (cnt >= limit) return; }
+  })();
+  return cnt;
+}
+
+/* 难度按"解题要用到多深的技巧"分级，与当前引擎的技巧库对齐：
+   L1 唯一余数 / 唯一位置 · L2 裸/隐性数对三数组、区块/行列排除
+   L3 四数组、X-Wing/剑鱼、摩天楼、双线风筝、XY/XYZ-Wing · L4 水母、W-Wing、远程数对、单数链染色、唯一矩形、XY 链 */
+function techLevel(tech) {
+  if (tech.includes('唯一候选') || tech.includes('唯一位置')) return 1;
+  if (tech.includes('水母') || tech.includes('远程数对') || tech.includes('单数链染色') || tech.includes('唯一矩形') || tech.includes('XY 链') || tech.includes('W-Wing')) return 4;
+  if (tech.includes('四数组') || tech.includes('剑鱼') || tech.includes('摩天楼') || tech.includes('双线风筝') || tech.includes('Wing') || tech.includes('X-Wing')) return 3;
+  return 2;
+}
+
+// 难度体检：用提示引擎一路解完，统计每级技巧各用多少（getHint 定义在下方，函数声明会提升）
+function analyzeDifficulty(puzzle) {
+  const b = [...puzzle];
+  const a = { solvable: false, advanced: 0, highSteps: 0, maxLevel: 0, nakedSingles: 0, hiddenSingles: 0 };
+  for (let s = 0; s < 81; s++) {
+    if (b.every(v => v)) { a.solvable = true; return a; }
+    const h = getHint(b), last = h.steps && h.steps[h.steps.length - 1];
+    if (!h.ok || !last || !last.digit) return a;
+    for (const st of h.steps) {
+      const L = techLevel(st.tech);
+      a.maxLevel = Math.max(a.maxLevel, L);
+      if (st.digit) { if (st.tech.includes('唯一候选')) a.nakedSingles++; else a.hiddenSingles++; }
+      else { a.advanced++; if (L >= 3) a.highSteps++; }
+    }
+    b[last.cell] = last.digit;
+  }
+  a.solvable = b.every(v => v);
+  return a;
+}
+
+/* 四档标准（target 为挖空目标；大师挖到删无可删）：
+   简单 只用唯一余数 · 中等 唯一余数+唯一位置 · 困难 必须用 L2、但用不到 L3 · 大师 至少 5 次排除且至少 2 次 L3+ */
+const DIFFS = {
+  easy:   { label:'简单', target: 40, budget: 1500, pass: a => a.maxLevel <= 1 && a.hiddenSingles === 0,
+            score: a => -a.hiddenSingles * 10 - a.advanced * 100, desc: '只靠「唯一余数」就能解完' },
+  medium: { label:'中等', target: 31, budget: 2500, pass: a => a.maxLevel <= 1 && a.hiddenSingles >= 3,
+            score: a => a.hiddenSingles * 10 - a.advanced * 100, desc: '需要「唯一余数 + 唯一位置」配合' },
+  hard:   { label:'困难', target: 25, budget: 4000, pass: a => a.advanced >= 1 && a.maxLevel <= 2,
+            score: a => (a.maxLevel <= 2 ? 0 : -5000) + a.advanced * 100, desc: '需要数对、区块排除等基础高级技巧' },
+  master: { label:'大师', target: 17, budget: 4000, pass: a => a.advanced >= 5 && a.highSteps >= 2,
+            score: a => a.highSteps * 1000 + a.advanced * 50, desc: '需要 X-Wing、剑鱼、XY-Wing 等高级技巧多次配合' },
+};
+
+function genPuzzle(diff) {
+  const spec = DIFFS[diff];
+  let fallback = null, best = null, bestScore = -Infinity;
+  const t0 = Date.now();
+  for (let attempt = 0; attempt < 40; attempt++) {
+    if (best && Date.now() - t0 > spec.budget) break; // 挑题别拖太久，用已找到的最贴合的
+    const sol = genSolution(), b = [...sol];
+    fallback = b;
+    let left = 81, progress = true;
+    while (left > spec.target && progress) { // 多趟删除：一趟删不动的，换个顺序再试
+      progress = false;
+      for (const i of shuffled([...Array(81).keys()])) {
+        if (left <= spec.target) break;
+        if (!b[i]) continue;
+        const bak = b[i]; b[i] = 0;
+        if (countSolutions([...b]) !== 1) b[i] = bak; else { left--; progress = true; }
+      }
+    }
+    const a = analyzeDifficulty(b);
+    if (!a.solvable) continue; // 保证提示引擎全程推得出下一步
+    if (spec.pass(a)) return b;
+    const score = spec.score(a) - left;
+    if (score > bestScore) { best = b; bestScore = score; }
+  }
+  return best || fallback;
+}
+
+/* ================= 逻辑提示引擎 =================
+   只根据当前盘面已填数字做逻辑推理，绝不查解盘、绝不猜测/穷举试错。
+   技巧链：唯一候选 → 单元唯一位置 → 裸/隐性数组、区块排除、行列排除、X-Wing、剑鱼、水母、
+   摩天楼、双线风筝、XY-Wing、XYZ-Wing、W-Wing、远程数对、单数链染色、唯一矩形、XY 链
+   后几类先做"排除"，排除后若逼出唯一候选，再把完整链条讲出来。 */
+function deriveCandidates(board) {
+  return board.map((v, i) => v ? null :
+    new Set(ALL.filter(d => peersOf(i).every(q => board[q] !== d))));
+}
+
+function nakedSingle(cands) {
+  for (let i = 0; i < 81; i++) if (cands[i] && cands[i].size === 1)
+    return { cell: i, digit: [...cands[i]][0] };
+  return null;
+}
+function hiddenSingle(board, cands) {
+  for (const u of UNITS) for (const d of ALL) {
+    if (u.cells.some(i => board[i] === d)) continue;
+    const spots = u.cells.filter(i => cands[i] && cands[i].has(d));
+    if (spots.length === 1) return { cell: spots[0], digit: d, unit: u };
+  }
+  return null;
+}
+
+function combos(arr, k) {
+  const out = [];
+  (function bt(s, cur) {
+    if (cur.length === k) { out.push([...cur]); return; }
+    for (let i = s; i < arr.length; i++) { cur.push(arr[i]); bt(i + 1, cur); cur.pop(); }
+  })(0, []);
+  return out;
+}
+
+// 各类排除技巧：找到一处可排除就返回 {tech, text, cells, rel, elims:[{i,d}]}
+function findElimination(board, cands) {
+  // 裸数对 / 裸三数组 / 裸四数组：同单元 k 个格子候选恰为同一组 k 个数 → 从单元其余格删掉这组数
+  for (const k of [2, 3, 4]) for (const u of UNITS) {
+    const groups = new Map();
+    u.cells.forEach(i => { if (cands[i] && cands[i].size === k) {
+      const key = [...cands[i]].sort().join('');
+      groups.set(key, [...(groups.get(key) || []), i]);
+    }});
+    for (const [key, cells] of groups) if (cells.length === k) {
+      const ds = [...key].map(Number);
+      const elims = [];
+      u.cells.forEach(i => { if (cands[i] && !cells.includes(i)) ds.forEach(d => cands[i].has(d) && elims.push({ i, d })); });
+      if (elims.length) return {
+        tech: ['','', '裸数对（Naked Pair）', '裸三数组（Naked Triple）', '裸四数组（Naked Quad）'][k],
+        text: `看${unitName(u)}：${cells.map(rcName).join('、')} 这${k}个格子的候选都只剩 {${ds.join(', ')}}。\n这${k}个数字必然被这${k}个格子占掉，所以${unitName(u)}的其他格子不可能再是 ${ds.join(' 或 ')}，把它们从候选里划掉。`,
+        cells, rel: u.cells.filter(i => cands[i] && !cells.includes(i)), elims };
+    }
+  }
+  // 隐性数组：k 个数字在单元里合计只能落在 k 个格子 → 这 k 格的其他候选删掉
+  for (const k of [2, 3, 4]) for (const u of UNITS) {
+    const present = ALL.filter(d => !u.cells.some(i => board[i] === d) && u.cells.some(i => cands[i] && cands[i].has(d)));
+    for (const ds of combos(present, k)) {
+      const spots = u.cells.filter(i => cands[i] && ds.some(d => cands[i].has(d)));
+      if (spots.length !== k) continue;
+      const elims = [];
+      spots.forEach(i => [...cands[i]].forEach(d => { if (!ds.includes(d)) elims.push({ i, d }); }));
+      if (elims.length) return {
+        tech: ['','', '隐性数对（Hidden Pair）', '隐性三数组（Hidden Triple）', '隐性四数组（Hidden Quad）'][k],
+        text: `看${unitName(u)}：数字 {${ds.join(', ')}} 在这个${u.type}里翻来覆去只能落在 ${spots.map(rcName).join('、')} 这${k}个格子。\n既然这${k}个数字必须占住这${k}个格子，这几格就不可能再是其他数字，把它们多余的候选划掉。`,
+        cells: spots, rel: elims.map(e => e.i), elims };
+    }
+  }
+  // 区块排除（指向）：某数字在一个宫里只能落在同一行/列 → 该行/列宫外格删掉它
+  for (let b = 0; b < 9; b++) {
+    const u = UNITS.find(x => x.type === '宫' && x.n === b + 1);
+    for (const d of ALL) {
+      if (u.cells.some(i => board[i] === d)) continue;
+      const spots = u.cells.filter(i => cands[i] && cands[i].has(d));
+      if (spots.length < 2) continue;
+      for (const [same, lineType] of [[i => i/9|0, '行'], [i => i%9, '列']]) {
+        if (!spots.every(i => same(i) === same(spots[0]))) continue;
+        const line = same(spots[0]);
+        const elims = [];
+        for (let k = 0; k < 9; k++) {
+          const i = lineType === '行' ? idx(line, k) : idx(k, line);
+          if (!u.cells.includes(i) && cands[i] && cands[i].has(d)) elims.push({ i, d });
+        }
+        if (elims.length) return {
+          tech: '区块排除（Pointing Pair）',
+          text: `看第${b+1}宫：数字 ${d} 在这个宫里只可能落在同一${lineType}（${spots.map(rcName).join('、')}）。\n也就是说这一${lineType}的 ${d} 已经被这个宫"预定"了，所以同${lineType}宫之外的格子不可能是 ${d}，划掉它们的候选 ${d}。`,
+          cells: spots, rel: elims.map(e => e.i), elims };
+      }
+    }
+  }
+  // 行列排除（占位）：某数字在一行/列里只能落在同一个宫 → 该宫同行/列外格删掉它
+  for (const u of UNITS.filter(x => x.type !== '宫')) for (const d of ALL) {
+    if (u.cells.some(i => board[i] === d)) continue;
+    const spots = u.cells.filter(i => cands[i] && cands[i].has(d));
+    if (spots.length < 2 || new Set(spots.map(i => boxOf(i/9|0, i%9))).size !== 1) continue;
+    const box = UNITS.find(x => x.type === '宫' && x.n === boxOf(spots[0]/9|0, spots[0]%9) + 1);
+    const elims = [];
+    box.cells.forEach(i => { if (!u.cells.includes(i) && cands[i] && cands[i].has(d)) elims.push({ i, d }); });
+    if (elims.length) return {
+      tech: '行列排除（Box-Line Reduction）',
+      text: `看${unitName(u)}：数字 ${d} 在这一${u.type}只可能落在第${box.n}宫内（${spots.map(rcName).join('、')}）。\n所以第${box.n}宫里、不在这一${u.type}上的格子不可能是 ${d}，划掉它们的候选 ${d}。`,
+      cells: spots, rel: elims.map(e => e.i), elims };
+  }
+  // X-Wing：某数字恰有两行都只能落在相同两列 → 这两列其他行删掉它
+  for (const d of ALL) {
+    const rows = [];
+    for (let r = 0; r < 9; r++) {
+      const cols = [];
+      for (let c = 0; c < 9; c++) if (cands[idx(r,c)] && cands[idx(r,c)].has(d)) cols.push(c);
+      if (cols.length === 2) rows.push({ r, cols });
+    }
+    for (let a = 0; a < rows.length; a++) for (let b2 = a + 1; b2 < rows.length; b2++) {
+      if (rows[a].cols.join() !== rows[b2].cols.join()) continue;
+      const elims = [];
+      for (let r = 0; r < 9; r++) if (r !== rows[a].r && r !== rows[b2].r)
+        rows[a].cols.forEach(c => { const i = idx(r, c); if (cands[i] && cands[i].has(d)) elims.push({ i, d }); });
+      if (elims.length) return {
+        tech: 'X-Wing',
+        text: `看数字 ${d}：第${rows[a].r+1}行和第${rows[b2].r+1}行里，${d} 都只能落在第${rows[a].cols[0]+1}列或第${rows[a].cols[1]+1}列，形成一个矩形（X-Wing）。\n这两列的 ${d} 必被这两行占掉，所以这两列其他行的格子不可能是 ${d}，划掉。`,
+        cells: [idx(rows[a].r, rows[a].cols[0]), idx(rows[a].r, rows[a].cols[1]), idx(rows[b2].r, rows[a].cols[0]), idx(rows[b2].r, rows[a].cols[1])],
+        rel: elims.map(e => e.i), elims };
+    }
+  }
+  // 剑鱼 / 水母（Swordfish / Jellyfish）：某数字在 k 条线里合计只能落在相同 k 条交叉线 → 交叉线其他位置删掉它
+  for (const size of [3, 4]) for (const byRow of [true, false]) for (const d of ALL) {
+    const lines = [];
+    for (let a = 0; a < 9; a++) {
+      const pos = [];
+      for (let b = 0; b < 9; b++) { const i = byRow ? idx(a, b) : idx(b, a); if (cands[i] && cands[i].has(d)) pos.push(b); }
+      if (pos.length >= 2 && pos.length <= size) lines.push({ a, pos });
+    }
+    for (const group of combos(lines, size)) {
+      const cross = [...new Set(group.reduce((acc, l) => acc.concat(l.pos), []))];
+      if (cross.length !== size) continue;
+      const base = new Set(group.map(l => l.a)), elims = [], cells = [];
+      group.forEach(l => l.pos.forEach(b => cells.push(byRow ? idx(l.a, b) : idx(b, l.a))));
+      for (let a = 0; a < 9; a++) if (!base.has(a)) cross.forEach(b => {
+        const i = byRow ? idx(a, b) : idx(b, a); if (cands[i] && cands[i].has(d)) elims.push({ i, d });
+      });
+      if (elims.length) return {
+        tech: size === 3 ? '剑鱼（Swordfish）' : '水母（Jellyfish）',
+        text: `看数字 ${d}：它在第${group.map(l => l.a + 1).join('、')}这${size}${byRow ? '行' : '列'}里，每条线最多落在 ${cross.map(v => `第${v + 1}${byRow ? '列' : '行'}`).join('、')} 这${size}处，构成"${size === 3 ? '剑鱼' : '水母'}"。\n这${size}条交叉线的 ${d} 必被这${size}条线占掉，所以交叉线其他位置上的格子不可能是 ${d}，划掉。`,
+        cells, rel: elims.map(e => e.i), elims };
+    }
+  }
+  // XY-Wing：枢纽格 {x,y} + 两翼 {x,z}、{y,z}（两翼都能看见枢纽）→ 同时能看见两翼的格删掉 z
+  for (let p = 0; p < 81; p++) {
+    if (!cands[p] || cands[p].size !== 2) continue;
+    const [x, y] = [...cands[p]], peers = peersOf(p);
+    const wings = peers.filter(i => cands[i] && cands[i].size === 2);
+    for (const w1 of wings) for (const w2 of wings) {
+      if (w2 <= w1) continue;
+      const a = [...cands[w1]], b = [...cands[w2]];
+      const z = a.find(d => d !== x && b.includes(d) && d !== y && (a.includes(x) && b.includes(y) || a.includes(y) && b.includes(x)) ? d : null);
+      if (!z) continue;
+      const p2set = new Set(peersOf(w2));
+      const elims = [];
+      peersOf(w1).forEach(i => { if (i !== p && i !== w1 && i !== w2 && p2set.has(i) && cands[i] && cands[i].has(z)) elims.push({ i, d: z }); });
+      if (elims.length) return {
+        tech: 'XY-Wing',
+        text: `找到一组 XY-Wing：枢纽格 ${rcName(p)} 只能是 ${x} 或 ${y}；它的两个"翅膀" ${rcName(w1)}（候选 ${a.join('/') }）和 ${rcName(w2)}（候选 ${b.join('/') }）都能看见枢纽。\n分情况想：如果枢纽是 ${x}，一侧翅膀就被逼成 ${z}；如果枢纽是 ${y}，另一侧翅膀被逼成 ${z}。无论哪种情况，总有一个翅膀是 ${z}。\n所以同时能看见两个翅膀的格子绝不可能是 ${z}，把它们的候选 ${z} 划掉。`,
+        cells: [p, w1, w2], rel: elims.map(e => e.i), elims };
+    }
+  }
+  // 摩天楼（Skyscraper）：某数字在两行都只剩两处且共享一列 → 两行另一端的共同可见格删掉它
+  for (const byRow of [true, false]) for (const d of ALL) {
+    const lines = [];
+    for (let a = 0; a < 9; a++) {
+      const pos = [];
+      for (let b = 0; b < 9; b++) { const i = byRow ? idx(a, b) : idx(b, a); if (cands[i] && cands[i].has(d)) pos.push(b); }
+      if (pos.length === 2) lines.push({ a, pos });
+    }
+    for (let i = 0; i < lines.length; i++) for (let j = i + 1; j < lines.length; j++) {
+      const shared = lines[i].pos.filter(b => lines[j].pos.includes(b));
+      if (shared.length !== 1) continue;
+      const e1 = byRow ? idx(lines[i].a, lines[i].pos.find(b => b !== shared[0])) : idx(lines[i].pos.find(b => b !== shared[0]), lines[i].a);
+      const e2 = byRow ? idx(lines[j].a, lines[j].pos.find(b => b !== shared[0])) : idx(lines[j].pos.find(b => b !== shared[0]), lines[j].a);
+      const peers2 = new Set(peersOf(e2)), elims = [];
+      peersOf(e1).forEach(v => { if (v !== e1 && v !== e2 && peers2.has(v) && cands[v] && cands[v].has(d)) elims.push({ i: v, d }); });
+      if (elims.length) return {
+        tech: '摩天楼（Skyscraper）',
+        text: `看数字 ${d}：第${lines[i].a + 1}${byRow ? '行' : '列'}和第${lines[j].a + 1}${byRow ? '行' : '列'}里它都只剩两处，且两条线在第${shared[0] + 1}${byRow ? '列' : '行'}对齐（楼底）。\n两条线各要放一个 ${d}，楼底最多容一个，所以两个"楼顶"（${rcName(e1)}、${rcName(e2)}）至少有一个是 ${d}。\n因此同时能看见两个楼顶的格子不可能是 ${d}，划掉。`,
+        cells: [e1, e2], rel: elims.map(e => e.i), elims };
+    }
+  }
+  // 双线风筝（Two-String Kite）：一行与一列各只剩两处放某数字，且一端在同一宫相接 → 另一端的交点格删掉它
+  for (const d of ALL) {
+    const rowPairs = [], colPairs = [];
+    for (let r = 0; r < 9; r++) { const cs = []; for (let c = 0; c < 9; c++) if (cands[idx(r, c)] && cands[idx(r, c)].has(d)) cs.push(c); if (cs.length === 2) rowPairs.push({ r, cs }); }
+    for (let c = 0; c < 9; c++) { const rs = []; for (let r = 0; r < 9; r++) if (cands[idx(r, c)] && cands[idx(r, c)].has(d)) rs.push(r); if (rs.length === 2) colPairs.push({ c, rs }); }
+    for (const rp of rowPairs) for (const cp of colPairs) for (const rc of rp.cs) for (const rr of cp.rs) {
+      const a = idx(rp.r, rc), b = idx(rr, cp.c);
+      if (a === b) continue; // 两根线必须落在同宫的两个不同格子；共用一格时结论不成立
+      if (boxOf(a / 9 | 0, a % 9) !== boxOf(b / 9 | 0, b % 9)) continue;
+      const oc = rp.cs.find(v => v !== rc), orow = cp.rs.find(v => v !== rr), victim = idx(orow, oc);
+      const ends = [a, b, idx(rp.r, oc), idx(orow, cp.c)];
+      if (ends.includes(victim) || !cands[victim] || !cands[victim].has(d)) continue; // 被排除格不能是风筝自身的格子
+      return { tech: '双线风筝（Two-String Kite）',
+        text: `看数字 ${d}：第${rp.r + 1}行里它只剩两处、第${cp.c + 1}列里也只剩两处，且两条线的各一端落在同一个宫里"接"上了（风筝的两根线）。\n沿线推：两根线的自由端（${rcName(idx(rp.r, oc))} 与 ${rcName(idx(orow, cp.c))}）至少有一个是 ${d}，而 ${rcName(victim)} 同时能看见这两个自由端，所以它不可能是 ${d}，划掉。`,
+        cells: [...new Set(ends)], rel: [victim], elims: [{ i: victim, d }] };
+    }
+  }
+  // XYZ-Wing：枢纽格 {x,y,z} + 两翼 {x,z}、{y,z} → 同时看见三者的格删掉 z
+  for (let p = 0; p < 81; p++) {
+    if (!cands[p] || cands[p].size !== 3) continue;
+    const pv = [...cands[p]], pset = new Set(peersOf(p));
+    const wings = peersOf(p).filter(i => cands[i] && cands[i].size === 2 && [...cands[i]].every(d => pv.includes(d)));
+    for (const w1 of wings) for (const w2 of wings) {
+      if (w2 <= w1) continue;
+      const common = [...cands[w1]].filter(d => cands[w2].has(d));
+      if (common.length !== 1) continue;
+      const z = common[0], w2set = new Set(peersOf(w2)), elims = [];
+      peersOf(w1).forEach(v => { if (v !== p && v !== w1 && v !== w2 && pset.has(v) && w2set.has(v) && cands[v] && cands[v].has(z)) elims.push({ i: v, d: z }); });
+      if (elims.length) return {
+        tech: 'XYZ-Wing',
+        text: `找到 XYZ-Wing：枢纽格 ${rcName(p)} 有三个候选 {${pv.join(', ')}}，两翼 ${rcName(w1)}、${rcName(w2)} 分别是 {${[...cands[w1]].join(', ')}}、{${[...cands[w2]].join(', ')}}，都能看见枢纽。\n无论枢纽最后是哪个数，枢纽与两翼这三格里总有一格是 ${z}。所以同时能看见这三格的格子不可能是 ${z}，划掉。`,
+        cells: [p, w1, w2], rel: elims.map(e => e.i), elims };
+    }
+  }
+  // W-Wing：两个不互相看见的同对双值格，被一对关于某数字的强链间接相连 → 共同可见格删掉另一个数字
+  {
+    const biv = [];
+    for (let i = 0; i < 81; i++) if (cands[i] && cands[i].size === 2) biv.push(i);
+    const strongPairs = d => {
+      const pairs = [];
+      for (const u of UNITS) { const s = u.cells.filter(i => cands[i] && cands[i].has(d)); if (s.length === 2) pairs.push(s); }
+      return pairs;
+    };
+    for (const p of biv) for (const q of biv) {
+      if (q <= p) continue;
+      const pv = [...cands[p]];
+      if ([...cands[q]].join() !== [...cands[p]].sort().join() && [...cands[q]].sort().join() !== pv.sort().join()) continue;
+      if (peersOf(p).includes(q)) continue;
+      for (const link of pv) {
+        const other = pv.find(d => d !== link);
+        for (const [a, b] of strongPairs(link)) {
+          const sees = (u, v) => peersOf(u).includes(v);
+          if (!((sees(a, p) && sees(b, q)) || (sees(a, q) && sees(b, p)))) continue;
+          if (a === p || a === q || b === p || b === q) continue;
+          const qset = new Set(peersOf(q)), elims = [];
+          peersOf(p).forEach(v => { if (v !== p && v !== q && v !== a && v !== b && qset.has(v) && cands[v] && cands[v].has(other)) elims.push({ i: v, d: other }); });
+          if (elims.length) return {
+            tech: 'W-Wing',
+            text: `${rcName(p)} 与 ${rcName(q)} 都是双值格 {${pv.join(', ')}}（W-Wing 的两端）。${rcName(a)} 与 ${rcName(b)} 之间有一条关于 ${link} 的强链：它所在的单元里 ${link} 只剩这两处，必有一处是 ${link}，且两处分别能看见两端。\n假设某个同时看见两端的格子是 ${other}，两端就都被逼成 ${link}；再沿强链推，必有一端其实不是 ${link}——矛盾。所以这样的格子不可能是 ${other}，划掉。`,
+            cells: [p, q, a, b], rel: elims.map(e => e.i), elims };
+        }
+      }
+    }
+  }
+  // 远程数对（Remote Pairs）：一串相同的双值格首尾相连成链 → 同时看见链上异色两格的格子，两个候选都删
+  {
+    const groups = new Map();
+    for (let i = 0; i < 81; i++) if (cands[i] && cands[i].size === 2) {
+      const key = [...cands[i]].sort().join('');
+      groups.set(key, [...(groups.get(key) || []), i]);
+    }
+    for (const [key, cells] of groups) {
+      if (cells.length < 4) continue;
+      const ds = [...key].map(Number), inGroup = new Set(cells), seen = new Set();
+      for (const start of cells) {
+        if (seen.has(start)) continue;
+        const color = new Map([[start, 0]]), queue = [start]; seen.add(start);
+        while (queue.length) { const cur = queue.shift(); peersOf(cur).forEach(n => { if (inGroup.has(n) && !color.has(n)) { color.set(n, 1 - color.get(cur)); seen.add(n); queue.push(n); } }); }
+        if (color.size < 4) continue;
+        const colored = [...color.keys()], elims = [];
+        for (let v = 0; v < 81; v++) {
+          if (!cands[v] || inGroup.has(v)) continue;
+          const vp = new Set(peersOf(v)), has0 = colored.some(i => color.get(i) === 0 && vp.has(i)), has1 = colored.some(i => color.get(i) === 1 && vp.has(i));
+          if (has0 && has1) ds.forEach(d => { if (cands[v].has(d)) elims.push({ i: v, d }); });
+        }
+        if (elims.length) return {
+          tech: '远程数对（Remote Pairs）',
+          text: `有一串候选同为 {${ds.join(', ')}} 的双值格互相"看得见"、连成一条链（${colored.map(rcName).join(' → ')} 的可见关系）。链上相邻两格必然一格是 ${ds[0]}、一格是 ${ds[1]}，沿链交替。\n把链交替染成两色：同色格取值相同、异色格取值相反。任何格子若同时看见一格红色和一格蓝色，那两格一个是 ${ds[0]}、一个是 ${ds[1]}，所以它两个数都不可能是，划掉。`,
+          cells: colored, rel: [...new Set(elims.map(e => e.i))], elims };
+      }
+    }
+  }
+  // 单数链染色（Simple Coloring）：某数字的强链交替染色，同色相见或一格同见异色 → 排除
+  for (const d of ALL) {
+    const nodes = [];
+    for (let i = 0; i < 81; i++) if (cands[i] && cands[i].has(d)) nodes.push(i);
+    const adj = new Map(nodes.map(i => [i, new Set()]));
+    for (const u of UNITS) {
+      const s = u.cells.filter(i => cands[i] && cands[i].has(d));
+      if (s.length === 2) { adj.get(s[0]).add(s[1]); adj.get(s[1]).add(s[0]); }
+    }
+    const visited = new Set();
+    for (const start of nodes) {
+      if (visited.has(start) || !adj.get(start).size) continue;
+      const color = new Map([[start, 0]]), queue = [start]; visited.add(start);
+      while (queue.length) { const cur = queue.shift(); adj.get(cur).forEach(n => { if (!color.has(n)) { color.set(n, 1 - color.get(cur)); visited.add(n); queue.push(n); } }); }
+      if (color.size < 4) continue;
+      const colored = [...color.keys()];
+      for (const col of [0, 1]) { // 规则一：同色两格互相看得见 → 这一色全假
+        const same = colored.filter(i => color.get(i) === col);
+        const clash = same.some((a, x) => same.some((b, y) => y > x && peersOf(a).includes(b)));
+        if (clash) return {
+          tech: '单数链染色（Simple Coloring）',
+          text: `只盯数字 ${d}：把"某单元里只剩两处能放 ${d}"的格子两两连成强链，沿链交替染色。结果发现有两格同色却互相看得见——同色的格子取值必然相同（要么全是 ${d}），可它们同处一个单元又不能同为 ${d}，说明这一色全是假的。\n所以这一色的格子都不可能是 ${d}，划掉。`,
+          cells: same, rel: same, elims: same.map(i => ({ i, d })) };
+      }
+      const elims = []; // 规则二：一格同时看见异色两格
+      for (const v of nodes) {
+        if (color.has(v)) continue;
+        const vp = new Set(peersOf(v));
+        if (colored.some(i => color.get(i) === 0 && vp.has(i)) && colored.some(i => color.get(i) === 1 && vp.has(i))) elims.push({ i: v, d });
+      }
+      if (elims.length) return {
+        tech: '单数链染色（Simple Coloring）',
+        text: `只盯数字 ${d}：把"某单元里只剩两处能放 ${d}"的格子两两连成强链并交替染色。链上异色两格必然一真一假（有一个是 ${d}）。\n有些格子同时能看见一红一蓝两格——无论哪色为真，它都会撞上一个 ${d}，所以它自己不可能是 ${d}，划掉。`,
+        cells: colored, rel: elims.map(e => e.i), elims };
+    }
+  }
+  // 唯一矩形 Type 1（Unique Rectangle）：矩形四角三格同为 {x,y}，第四格含 x/y 及其他数 → 第四格删 x/y
+  for (let r1 = 0; r1 < 9; r1++) for (let r2 = r1 + 1; r2 < 9; r2++) for (let c1 = 0; c1 < 9; c1++) for (let c2 = c1 + 1; c2 < 9; c2++) {
+    const corners = [idx(r1, c1), idx(r1, c2), idx(r2, c1), idx(r2, c2)];
+    if (new Set(corners.map(i => boxOf(i / 9 | 0, i % 9))).size !== 2) continue;
+    if (corners.some(i => !cands[i])) continue;
+    for (const fourth of corners) {
+      const rest = corners.filter(i => i !== fourth);
+      if (!rest.every(i => cands[i].size === 2)) continue;
+      const pair = [...cands[rest[0]]].sort().join();
+      if (!rest.every(i => [...cands[i]].sort().join() === pair)) continue;
+      const ds = [...cands[rest[0]]];
+      if (!(cands[fourth].size > 2 && ds.every(d => cands[fourth].has(d)))) continue;
+      return { tech: '唯一矩形（Unique Rectangle）',
+        text: `${corners.map(rcName).join('、')} 四格构成一个跨两个宫的矩形，其中三格候选都恰好是 {${ds.join(', ')}}。\n本题保证唯一解：如果第四格 ${rcName(fourth)} 也只剩 {${ds.join(', ')}}，矩形四角就能 ${ds[0]}/${ds[1]} 互换出另一个解，与唯一解矛盾。\n所以第四格不可能是 ${ds.join(' 或 ')}，把这两个候选划掉，只留其余候选。`,
+        cells: rest, rel: [fourth], elims: ds.map(d => ({ i: fourth, d })) };
+    }
+  }
+  // XY 链（XY-Chain）：双值格首尾相扣成链，两端共享一个数字 → 共同可见格删掉该数字
+  {
+    const biv = new Set();
+    for (let i = 0; i < 81; i++) if (cands[i] && cands[i].size === 2) biv.add(i);
+    const search = (start, z) => {
+      const dfs = (cur, linkIn, path) => {
+        const out = [...cands[cur]].find(d => d !== linkIn);
+        if (path.length >= 4 && out === z) {
+          const end = cur, eset = new Set(peersOf(end)), elims = [];
+          peersOf(start).forEach(v => { if (!path.includes(v) && eset.has(v) && cands[v] && cands[v].has(z)) elims.push({ i: v, d: z }); });
+          if (elims.length) return { path: [...path], end, elims };
+        }
+        if (path.length >= 8) return null;
+        for (const n of peersOf(cur)) {
+          if (!biv.has(n) || path.includes(n) || !cands[n].has(out)) continue;
+          const hit = dfs(n, out, [...path, n]);
+          if (hit) return hit;
+        }
+        return null;
+      };
+      return dfs(start, z, [start]);
+    };
+    for (const start of biv) for (const z of [...cands[start]]) {
+      const hit = search(start, z);
+      if (hit) return {
+        tech: 'XY 链（XY-Chain）',
+        text: `找到一条 XY 链：${hit.path.map(rcName).join(' → ')}，每格都是双值格、相邻两格共享一个候选，环环相扣。\n链的一端 ${rcName(start)} 含数字 ${z}，另一端 ${rcName(hit.end)} 也含 ${z}。沿链推理：无论从哪头开始取舍，总有一端最终是 ${z}（链会把取值一路"逼"过去）。\n所以同时能看见链两端的格子不可能是 ${z}，划掉。`,
+        cells: hit.path, rel: hit.elims.map(e => e.i), elims: hit.elims };
+    }
+  }
+  return null;
+}
+
+function explainNaked(board, cands, hit, priorSteps) {
+  const r = hit.cell/9|0, c = hit.cell%9;
+  const rowNums = [], colNums = [], boxNums = [];
+  for (let k = 0; k < 9; k++) {
+    if (board[idx(r,k)]) rowNums.push(board[idx(r,k)]);
+    if (board[idx(k,c)]) colNums.push(board[idx(k,c)]);
+    const i = idx((r/3|0)*3 + (k/3|0), (c/3|0)*3 + k%3); if (board[i]) boxNums.push(board[i]);
+  }
+  const ruled = [...new Set([...rowNums, ...colNums, ...boxNums])].sort((a,b) => a-b);
+  const base = `盯住 ${rcName(hit.cell)} 这个格子，先看它所在的行、列、宫里已经出现过的数字：\n` +
+    `· 第${r+1}行已有：${rowNums.sort((a,b)=>a-b).join('、') || '无'}\n` +
+    `· 第${c+1}列已有：${colNums.sort((a,b)=>a-b).join('、') || '无'}\n` +
+    `· 第${boxOf(r,c)+1}宫已有：${boxNums.sort((a,b)=>a-b).join('、') || '无'}\n` +
+    `这三组里 ${ruled.join('、')} 都不可能再填进这个格子。`;
+  const tail = priorSteps.length
+    ? `\n再结合前面几步划掉的候选，这个格子的候选只剩下一个了。\n所以不用猜——它只能是 ${hit.digit}。这就是"唯一候选"法。`
+    : `\n1~9 里没被排掉的只剩下一个。\n所以不用猜——它只能是 ${hit.digit}。这就是"唯一候选"法。`;
+  return { tech: '唯一候选（Naked Single）', text: base + tail,
+           cells: [hit.cell], rel: peersOf(hit.cell).filter(i => board[i]), digit: hit.digit, cell: hit.cell };
+}
+
+function explainHidden(board, cands, hit) {
+  const others = hit.unit.cells.filter(i => i !== hit.cell && !board[i]);
+  return { tech: '单元唯一位置（Hidden Single）',
+    text: `换个角度，看${unitName(hit.unit)}里数字 ${hit.digit} 能放哪儿。\n` +
+      `这个${hit.unit.type}的空格有：${[hit.cell, ...others].map(rcName).join('、')}。\n` +
+      `逐个排查：其余空格所在的行 / 列 / 宫里都已经有 ${hit.digit}，或者候选已被前面的推理划掉，所以它们都放不了 ${hit.digit}。\n` +
+      `整个${unitName(hit.unit)}里能放 ${hit.digit} 的只剩下 ${rcName(hit.cell)}。\n所以这一格就是 ${hit.digit}。这就是"唯一位置"法——不是看格子缺什么，而是看数字能去哪。`,
+    cells: [hit.cell], rel: others, digit: hit.digit, cell: hit.cell };
+}
+
+// 主入口：返回 {ok, steps:[{tech,text,cells,rel,digit?,cell?}]}，最后一步含 digit/cell
+function getHint(board) {
+  const conflict = findConflicts(board);
+  if (conflict.size) return { ok:false, msg:'盘面上有冲突的数字（红色格子），先把冲突改掉，再用提示才有意义。' };
+  if (board.every(v => v)) return { ok:false, msg:'盘面已经填满了。' };
+  const cands = deriveCandidates(board);
+  const steps = [];
+  let hit = nakedSingle(cands);
+  if (hit) return { ok:true, steps:[explainNaked(board, cands, hit, [])] };
+  hit = hiddenSingle(board, cands);
+  if (hit) return { ok:true, steps:[explainHidden(board, cands, hit)] };
+  // 没有直接结论：先用排除技巧一步步缩小候选，逼出结论
+  for (let round = 0; round < 40; round++) {
+    const elim = findElimination(board, cands);
+    if (!elim) break;
+    elim.elims.forEach(e => cands[e.i].delete(e.d));
+    steps.push({ tech: elim.tech, text: elim.text, cells: elim.cells, rel: elim.rel });
+    hit = nakedSingle(cands);
+    if (hit) { steps.push(explainNaked(board, cands, hit, steps)); return { ok:true, steps }; }
+    hit = hiddenSingle(board, cands);
+    if (hit) { steps.push(explainHidden(board, cands, hit)); return { ok:true, steps }; }
+  }
+  return { ok:false, msg:'当前盘面用已内置的逻辑技巧（唯一候选、唯一位置、裸/隐性数组、区块排除、X-Wing、剑鱼、水母、摩天楼、双线风筝、XY/XYZ-Wing、W-Wing、远程数对、单数链染色、唯一矩形、XY 链）暂时推不出确定的一步。\n建议先把每个空格的候选都标全，再点提示；或者换个区域看看。放心，我不会用猜测或试错来蒙一个答案给你。', steps };
+}
+
+function findConflicts(board) {
+  const bad = new Set();
+  for (const u of UNITS) {
+    const seen = new Map();
+    u.cells.forEach(i => { if (board[i]) { if (seen.has(board[i])) { bad.add(i); bad.add(seen.get(board[i])); } else seen.set(board[i], i); } });
+  }
+  return bad;
+}
+
+/* ================= 游戏状态 / UI ================= */
+let board, given, notes, sel = -1, diff = 'easy', seconds = 0, timerId = null, over = false;
+let hintSteps = [], hintPos = -1, hintTarget = null;
+
+const $ = id => document.getElementById(id);
+const boardEl = $('board'), statusEl = $('status');
+
+function newGame() {
+  board = genPuzzle(diff);
+  given = board.map(v => v !== 0);
+  notes = board.map(() => new Set());
+  sel = -1; over = false; seconds = 0;
+  closeHint();
+  $('win').classList.remove('show');
+  clearInterval(timerId);
+  timerId = setInterval(() => { seconds++; tick(); }, 1000);
+  tick(); render();
+  setStatus(`${DIFFS[diff].label} · ${board.filter(Boolean).length} 个提示数 · ${DIFFS[diff].desc}`);
+}
+function tick() { $('timer').textContent = `${String(seconds/60|0).padStart(2,'0')}:${String(seconds%60).padStart(2,'0')}`; }
+function setStatus(t, bad) { statusEl.textContent = t; statusEl.className = bad ? 'bad' : ''; }
+
+function render() {
+  const conflicts = findConflicts(board);
+  const selVal = sel >= 0 ? board[sel] : 0;
+  const hintMain = new Set(), hintRel = new Set(), hintElim = new Set();
+  if (hintPos >= 0 && hintSteps[hintPos]) {
+    const s = hintSteps[hintPos];
+    (s.cells || []).forEach(i => hintMain.add(i));
+    (s.rel || []).forEach(i => hintRel.add(i));
+    if (!('digit' in s)) (s.rel || []).forEach(i => hintElim.add(i));
+  }
+  boardEl.innerHTML = '';
+  for (let i = 0; i < 81; i++) {
+    const r = i/9|0, c = i%9, el = document.createElement('div');
+    el.className = 'cell' + (r % 3 === 2 ? ' br' : '');
+    if (given[i]) el.classList.add('given'); else if (board[i]) el.classList.add('user');
+    if (sel >= 0 && i !== sel) {
+      if (r === (sel/9|0) || c === sel%9 || boxOf(r,c) === boxOf(sel/9|0, sel%9)) el.classList.add('peer');
+      if (selVal && board[i] === selVal) el.classList.add('same');
+    }
+    if (i === sel) el.classList.add('sel');
+    if (conflicts.has(i)) el.classList.add('err');
+    if (hintMain.has(i)) el.classList.add('hint-main');
+    else if (hintElim.has(i) && hintPos >= 0 && !('digit' in hintSteps[hintPos])) el.classList.add('hint-elim');
+    else if (hintRel.has(i)) el.classList.add('hint-rel');
+
+    if (board[i]) el.textContent = board[i];
+    else if (notes[i].size) {
+      const g = document.createElement('div'); g.className = 'notes';
+      for (let d = 1; d <= 9; d++) { const s = document.createElement('span'); s.textContent = notes[i].has(d) ? d : ''; if (selVal && d === selVal && notes[i].has(d)) s.className = 'hit'; g.appendChild(s); }
+      el.appendChild(g);
+    }
+    el.addEventListener('click', () => { sel = i; render(); });
+    boardEl.appendChild(el);
+  }
+  // 数字键：显示每个数字还剩几个
+  document.querySelectorAll('#fillPad .key').forEach(k => {
+    const d = +k.dataset.d, left = 9 - board.filter(v => v === d).length;
+    k.querySelector('.left').textContent = left > 0 ? `剩 ${left}` : '已填满';
+    k.classList.toggle('done', left <= 0);
+    k.classList.toggle('active', selVal === d);
+  });
+}
+
+function place(i, d) {
+  board[i] = d; notes[i].clear();
+  peersOf(i).forEach(q => notes[q].delete(d)); // 同行/列/宫的候选自动划掉这个数
+}
+function afterMove() {
+  render();
+  if (over) return;
+  const conflicts = findConflicts(board);
+  if (conflicts.size) { setStatus('有重复数字冲突，已标红，改掉它们再继续', true); return; }
+  if (board.every(v => v)) {
+    over = true; clearInterval(timerId);
+    $('winText').textContent = `难度：${DIFFS[diff].label} · 用时 ${$('timer').textContent}`;
+    $('win').classList.add('show');
+  } else setStatus('点选一个格子，再点下方数字填入');
+}
+
+function fill(d) {
+  if (sel < 0) return setStatus('先点选一个要填的格子', true);
+  if (given[sel] || over) return;
+  closeHint(); place(sel, d); afterMove();
+}
+function toggleNote(d) {
+  if (sel < 0) return setStatus('先点选一个要标记的格子', true);
+  if (given[sel] || board[sel] || over) return;
+  notes[sel].has(d) ? notes[sel].delete(d) : notes[sel].add(d);
+  render();
+}
+function erase() {
+  if (sel < 0 || given[sel] || over) return;
+  board[sel] = 0; notes[sel].clear(); closeHint(); afterMove();
+}
+
+/* ---------- 提示 UI：逐步揭示推理，绝不一上来报答案 ---------- */
+function showHintStep() {
+  const s = hintSteps[hintPos], last = hintPos === hintSteps.length - 1;
+  $('hintStep').textContent = hintSteps.length > 1 ? `第 ${hintPos + 1} / ${hintSteps.length} 步` : '推理过程';
+  $('hintTech').textContent = s.tech;
+  $('hintText').textContent = s.text;
+  $('prevBtn').disabled = hintPos === 0;
+  $('nextBtn').style.display = last ? 'none' : '';
+  $('applyBtn').style.display = last && s.digit ? '' : 'none';
+  render();
+}
+function openHint() {
+  if (over) return;
+  const res = getHint(board);
+  if (!res.ok) { setStatus(res.msg.split('\n')[0], true); if (res.msg.includes('\n')) alert(res.msg); return; }
+  hintSteps = res.steps; hintPos = 0;
+  hintTarget = hintSteps[hintSteps.length - 1];
+  $('mask').classList.add('show');
+  showHintStep();
+}
+function closeHint() { hintSteps = []; hintPos = -1; hintTarget = null; $('mask').classList.remove('show'); if (board) render(); }
+
+/* ---------- 构建键盘 ---------- */
+for (let d = 1; d <= 9; d++) {
+  const f = document.createElement('button');
+  f.className = 'key fill-key'; f.dataset.d = d;
+  f.innerHTML = `<span class="n">${d}</span><span class="left"></span>`;
+  f.addEventListener('click', () => fill(d));
+  $('fillPad').appendChild(f);
+  const n = document.createElement('button');
+  n.className = 'key note-key'; n.dataset.d = d;
+  n.innerHTML = `<span class="n">${d}</span><span class="t">候选</span>`;
+  n.addEventListener('click', () => toggleNote(d));
+  $('notePad').appendChild(n);
+}
+
+$('eraseBtn').addEventListener('click', erase);
+$('hintBtn').addEventListener('click', openHint);
+$('checkBtn').addEventListener('click', () => {
+  const bad = findConflicts(board);
+  if (bad.size) setStatus(`发现 ${bad.size} 个冲突格（标红处），同行/列/宫里有重复数字`, true);
+  else if (board.every(v => v)) setStatus('全部填完且无冲突 🎉');
+  else setStatus(`暂时没有冲突，已填 ${board.filter(Boolean).length} / 81 格，继续加油`);
+  render();
+});
+function queueNewGame() { // 大师出题要挑题，先把提示文字画出来再同步生成，免得像卡死
+  if (diff === 'hard' || diff === 'master') setStatus(`正在挑一道符合「${DIFFS[diff].label}」标准的题，稍等…`);
+  setTimeout(newGame, 30);
+}
+$('newBtn').addEventListener('click', queueNewGame);
+$('againBtn').addEventListener('click', queueNewGame);
+$('diffSeg').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  document.querySelectorAll('#diffSeg button').forEach(x => x.classList.toggle('on', x === b));
+  diff = b.dataset.d; queueNewGame();
+});
+$('hintClose').addEventListener('click', closeHint);
+$('mask').addEventListener('click', e => { if (e.target === $('mask')) closeHint(); });
+$('prevBtn').addEventListener('click', () => { if (hintPos > 0) { hintPos--; showHintStep(); } });
+$('nextBtn').addEventListener('click', () => { if (hintPos < hintSteps.length - 1) { hintPos++; showHintStep(); } });
+$('applyBtn').addEventListener('click', () => {
+  if (!hintTarget) return;
+  sel = hintTarget.cell; place(sel, hintTarget.digit); closeHint(); afterMove();
+});
+
+/* 桌面键盘：数字填入，Shift+数字标候选，退格擦除，方向键移动，H 提示 */
+document.addEventListener('keydown', e => {
+  if (e.key >= '1' && e.key <= '9') (e.shiftKey ? toggleNote : fill)(+e.key);
+  else if (e.key === 'Backspace' || e.key === 'Delete') erase();
+  else if (e.key === 'h' || e.key === 'H') openHint();
+  else if (e.key.startsWith('Arrow') && sel >= 0) {
+    e.preventDefault();
+    let r = sel/9|0, c = sel%9;
+    if (e.key === 'ArrowUp') r = Math.max(0, r-1); if (e.key === 'ArrowDown') r = Math.min(8, r+1);
+    if (e.key === 'ArrowLeft') c = Math.max(0, c-1); if (e.key === 'ArrowRight') c = Math.min(8, c+1);
+    sel = idx(r, c); render();
+  }
+});
+
+newGame();
