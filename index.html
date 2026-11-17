@@ -266,9 +266,11 @@ function countSolutions(b, limit = 2) {
 
 const GIVENS = { easy: 40, medium: 31, hard: 25, master: 22 };
 function genPuzzle(diff) {
-  let fallback = null, best = null, bestLeft = 99;
-  const master = diff === 'master', target = master ? 17 : GIVENS[diff]; // 大师：删到删无可删，再挑提示最少的
-  for (let attempt = 0; attempt < (master ? 6 : 30); attempt++) {
+  let fallback = null, best = null, bestScore = -1;
+  const master = diff === 'master', target = master ? 17 : GIVENS[diff]; // 大师：删到删无可删，再按解法难度挑
+  const t0 = Date.now();
+  for (let attempt = 0; attempt < (master ? 25 : 30); attempt++) {
+    if (master && best && Date.now() - t0 > 4000) break; // 别让挑题拖太久，用已找到的最难的
     const sol = genSolution(), b = [...sol];
     fallback = b;
     let left = 81, progress = true;
@@ -281,10 +283,14 @@ function genPuzzle(diff) {
         if (countSolutions([...b]) !== 1) b[i] = bak; else { left--; progress = true; }
       }
     }
-    if (!isLogicallySolvable(b)) continue; // 保证提示引擎全程推得出下一步
-    if (!master) return b;
-    if (left < bestLeft) { best = b; bestLeft = left; }
-    if (left <= GIVENS.master) break;
+    if (!master) { if (isLogicallySolvable(b)) return b; continue; }
+    // 大师门槛：逻辑可解，且全程至少用到 5 次高级排除——只靠唯一余数/唯一位置能点完的一律不要
+    const a = analyzeDifficulty(b);
+    if (!a.solvable) continue;
+    if (!best) best = b;
+    const score = a.advanced * 100 - left;
+    if (a.advanced >= 5) return b;
+    if (score > bestScore) { best = b; bestScore = score; }
   }
   return best || fallback;
 }
@@ -300,9 +306,23 @@ function isLogicallySolvable(puzzle) {
   return b.every(v => v);
 }
 
+// 难度体检：用提示引擎一路解完，数用了多少次"高级排除"（唯一余数/唯一位置之外的技巧）
+function analyzeDifficulty(puzzle) {
+  const b = [...puzzle];
+  let advanced = 0;
+  for (let s = 0; s < 81; s++) {
+    if (b.every(v => v)) return { solvable: true, advanced };
+    const h = getHint(b), last = h.steps && h.steps[h.steps.length - 1];
+    if (!h.ok || !last || !last.digit) return { solvable: false, advanced };
+    advanced += h.steps.filter(st => !st.digit).length;
+    b[last.cell] = last.digit;
+  }
+  return { solvable: b.every(v => v), advanced };
+}
+
 /* ================= 逻辑提示引擎 =================
    只根据当前盘面已填数字做逻辑推理，绝不查解盘、绝不猜测/穷举试错。
-   技巧链：唯一候选 → 单元唯一位置 → 裸数对/三数组、区块排除、行列排除、X-Wing
+   技巧链：唯一候选 → 单元唯一位置 → 裸/隐性数组、区块排除、行列排除、X-Wing、剑鱼、XY-Wing
    后几类先做"排除"，排除后若逼出唯一候选，再把完整链条讲出来。 */
 function deriveCandidates(board) {
   return board.map((v, i) => v ? null :
@@ -323,10 +343,19 @@ function hiddenSingle(board, cands) {
   return null;
 }
 
+function combos(arr, k) {
+  const out = [];
+  (function bt(s, cur) {
+    if (cur.length === k) { out.push([...cur]); return; }
+    for (let i = s; i < arr.length; i++) { cur.push(arr[i]); bt(i + 1, cur); cur.pop(); }
+  })(0, []);
+  return out;
+}
+
 // 各类排除技巧：找到一处可排除就返回 {tech, text, cells, rel, elims:[{i,d}]}
 function findElimination(board, cands) {
-  // 裸数对 / 裸三数组：同单元 k 个格子候选恰为同一组 k 个数 → 从单元其余格删掉这组数
-  for (const k of [2, 3]) for (const u of UNITS) {
+  // 裸数对 / 裸三数组 / 裸四数组：同单元 k 个格子候选恰为同一组 k 个数 → 从单元其余格删掉这组数
+  for (const k of [2, 3, 4]) for (const u of UNITS) {
     const groups = new Map();
     u.cells.forEach(i => { if (cands[i] && cands[i].size === k) {
       const key = [...cands[i]].sort().join('');
@@ -337,9 +366,23 @@ function findElimination(board, cands) {
       const elims = [];
       u.cells.forEach(i => { if (cands[i] && !cells.includes(i)) ds.forEach(d => cands[i].has(d) && elims.push({ i, d })); });
       if (elims.length) return {
-        tech: k === 2 ? '裸数对（Naked Pair）' : '裸三数组（Naked Triple）',
+        tech: ['','', '裸数对（Naked Pair）', '裸三数组（Naked Triple）', '裸四数组（Naked Quad）'][k],
         text: `看${unitName(u)}：${cells.map(rcName).join('、')} 这${k}个格子的候选都只剩 {${ds.join(', ')}}。\n这${k}个数字必然被这${k}个格子占掉，所以${unitName(u)}的其他格子不可能再是 ${ds.join(' 或 ')}，把它们从候选里划掉。`,
         cells, rel: u.cells.filter(i => cands[i] && !cells.includes(i)), elims };
+    }
+  }
+  // 隐性数对 / 隐性三数组：k 个数字在单元里合计只能落在 k 个格子 → 这 k 格的其他候选删掉
+  for (const k of [2, 3]) for (const u of UNITS) {
+    const present = ALL.filter(d => !u.cells.some(i => board[i] === d) && u.cells.some(i => cands[i] && cands[i].has(d)));
+    for (const ds of combos(present, k)) {
+      const spots = u.cells.filter(i => cands[i] && ds.some(d => cands[i].has(d)));
+      if (spots.length !== k) continue;
+      const elims = [];
+      spots.forEach(i => [...cands[i]].forEach(d => { if (!ds.includes(d)) elims.push({ i, d }); }));
+      if (elims.length) return {
+        tech: k === 2 ? '隐性数对（Hidden Pair）' : '隐性三数组（Hidden Triple）',
+        text: `看${unitName(u)}：数字 ${ds.join(' 和 ')} 在这个${u.type}里翻来覆去只能落在 ${spots.map(rcName).join('、')} 这${k}个格子。\n既然这${k}个数字必须占住这${k}个格子，这几格就不可能再是其他数字，把它们多余的候选划掉。`,
+        cells: spots, rel: elims.map(e => e.i), elims };
     }
   }
   // 区块排除（指向）：某数字在一个宫里只能落在同一行/列 → 该行/列宫外格删掉它
@@ -395,6 +438,47 @@ function findElimination(board, cands) {
         text: `看数字 ${d}：第${rows[a].r+1}行和第${rows[b2].r+1}行里，${d} 都只能落在第${rows[a].cols[0]+1}列或第${rows[a].cols[1]+1}列，形成一个矩形（X-Wing）。\n这两列的 ${d} 必被这两行占掉，所以这两列其他行的格子不可能是 ${d}，划掉。`,
         cells: [idx(rows[a].r, rows[a].cols[0]), idx(rows[a].r, rows[a].cols[1]), idx(rows[b2].r, rows[a].cols[0]), idx(rows[b2].r, rows[a].cols[1])],
         rel: elims.map(e => e.i), elims };
+    }
+  }
+  // 剑鱼（Swordfish）：某数字在三行里合计只能落在相同三列 → 这三列其他行删掉它（行/列两个方向）
+  for (const byRow of [true, false]) for (const d of ALL) {
+    const lines = [];
+    for (let a = 0; a < 9; a++) {
+      const pos = [];
+      for (let b = 0; b < 9; b++) { const i = byRow ? idx(a, b) : idx(b, a); if (cands[i] && cands[i].has(d)) pos.push(b); }
+      if (pos.length >= 2 && pos.length <= 3) lines.push({ a, pos });
+    }
+    for (const trio of combos(lines, 3)) {
+      const cross = [...new Set(trio.flatMap(l => l.pos))];
+      if (cross.length !== 3) continue;
+      const base = new Set(trio.map(l => l.a)), elims = [], cells = [];
+      trio.forEach(l => l.pos.forEach(b => cells.push(byRow ? idx(l.a, b) : idx(b, l.a))));
+      for (let a = 0; a < 9; a++) if (!base.has(a)) cross.forEach(b => {
+        const i = byRow ? idx(a, b) : idx(b, a); if (cands[i] && cands[i].has(d)) elims.push({ i, d });
+      });
+      if (elims.length) return {
+        tech: '剑鱼（Swordfish）',
+        text: `看数字 ${d}：它在第${trio.map(l => l.a + 1).join('、')}这三${byRow ? '行' : '列'}里，每${byRow ? '行' : '列'}最多落在 ${cross.map(v => `第${v + 1}${byRow ? '列' : '行'}`).join('、')} 这三处，构成"剑鱼"。\n这三${byRow ? '列' : '行'}的 ${d} 必被这三${byRow ? '行' : '列'}占掉，所以其他${byRow ? '行' : '列'}在三${byRow ? '列' : '行'}交点上的格子不可能是 ${d}，划掉。`,
+        cells, rel: elims.map(e => e.i), elims };
+    }
+  }
+  // XY-Wing：枢纽格 {x,y} + 两翼 {x,z}、{y,z}（两翼都能看见枢纽）→ 同时能看见两翼的格删掉 z
+  for (let p = 0; p < 81; p++) {
+    if (!cands[p] || cands[p].size !== 2) continue;
+    const [x, y] = [...cands[p]], peers = peersOf(p);
+    const wings = peers.filter(i => cands[i] && cands[i].size === 2);
+    for (const w1 of wings) for (const w2 of wings) {
+      if (w2 <= w1) continue;
+      const a = [...cands[w1]], b = [...cands[w2]];
+      const z = a.find(d => d !== x && b.includes(d) && d !== y && (a.includes(x) && b.includes(y) || a.includes(y) && b.includes(x)) ? d : null);
+      if (!z) continue;
+      const p2set = new Set(peersOf(w2));
+      const elims = [];
+      peersOf(w1).forEach(i => { if (i !== p && i !== w1 && i !== w2 && p2set.has(i) && cands[i] && cands[i].has(z)) elims.push({ i, d: z }); });
+      if (elims.length) return {
+        tech: 'XY-Wing',
+        text: `找到一组 XY-Wing：枢纽格 ${rcName(p)} 只能是 ${x} 或 ${y}；它的两个"翅膀" ${rcName(w1)}（候选 ${a.join('/') }）和 ${rcName(w2)}（候选 ${b.join('/') }）都能看见枢纽。\n分情况想：如果枢纽是 ${x}，一侧翅膀就被逼成 ${z}；如果枢纽是 ${y}，另一侧翅膀被逼成 ${z}。无论哪种情况，总有一个翅膀是 ${z}。\n所以同时能看见两个翅膀的格子绝不可能是 ${z}，把它们的候选 ${z} 划掉。`,
+        cells: [p, w1, w2], rel: elims.map(e => e.i), elims };
     }
   }
   return null;
@@ -453,7 +537,7 @@ function getHint(board) {
     hit = hiddenSingle(board, cands);
     if (hit) { steps.push(explainHidden(board, cands, hit)); return { ok:true, steps }; }
   }
-  return { ok:false, msg:'当前盘面用基础逻辑技巧（唯一候选、唯一位置、数对、区块排除、X-Wing）暂时推不出确定的一步。\n建议先把每个空格的候选都标全，再点提示；或者换个区域看看。放心，我不会用猜测或试错来蒙一个答案给你。', steps };
+  return { ok:false, msg:'当前盘面用已内置的逻辑技巧（唯一候选、唯一位置、裸/隐性数组、区块排除、X-Wing、剑鱼、XY-Wing）暂时推不出确定的一步。\n建议先把每个空格的候选都标全，再点提示；或者换个区域看看。放心，我不会用猜测或试错来蒙一个答案给你。', steps };
 }
 
 function findConflicts(board) {
@@ -607,12 +691,16 @@ $('checkBtn').addEventListener('click', () => {
   else setStatus(`暂时没有冲突，已填 ${board.filter(Boolean).length} / 81 格，继续加油`);
   render();
 });
-$('newBtn').addEventListener('click', newGame);
-$('againBtn').addEventListener('click', newGame);
+function queueNewGame() { // 大师出题要挑题，先把提示文字画出来再同步生成，免得像卡死
+  if (diff === 'master') setStatus('正在挑一道必须用高级技巧的大师题，稍等…');
+  setTimeout(newGame, 30);
+}
+$('newBtn').addEventListener('click', queueNewGame);
+$('againBtn').addEventListener('click', queueNewGame);
 $('diffSeg').addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b) return;
   document.querySelectorAll('#diffSeg button').forEach(x => x.classList.toggle('on', x === b));
-  diff = b.dataset.d; newGame();
+  diff = b.dataset.d; queueNewGame();
 });
 $('hintClose').addEventListener('click', closeHint);
 $('mask').addEventListener('click', e => { if (e.target === $('mask')) closeHint(); });
