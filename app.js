@@ -524,8 +524,8 @@ function explainHidden(board, cands, hit) {
     cells: [hit.cell], rel: others, digit: hit.digit, cell: hit.cell };
 }
 
-// 主入口：返回 {ok, steps:[{tech,text,cells,rel,digit?,cell?}]}，最后一步含 digit/cell
-function getHint(board) {
+// 内部搜索：返回 {ok, steps:[{tech,text,cells,rel,elims?,digit?,cell?}]}，最后一步含 digit/cell
+function searchHint(board) {
   const conflict = findConflicts(board);
   if (conflict.size) return { ok:false, msg:'盘面上有冲突的数字（红色格子），先把冲突改掉，再用提示才有意义。' };
   if (board.every(v => v)) return { ok:false, msg:'盘面已经填满了。' };
@@ -540,13 +540,42 @@ function getHint(board) {
     const elim = findElimination(board, cands);
     if (!elim) break;
     elim.elims.forEach(e => cands[e.i].delete(e.d));
-    steps.push({ tech: elim.tech, text: elim.text, cells: elim.cells, rel: elim.rel });
+    steps.push({ tech: elim.tech, text: elim.text, cells: elim.cells, rel: elim.rel, elims: elim.elims });
     hit = nakedSingle(cands);
     if (hit) { steps.push(explainNaked(board, cands, hit, steps)); return { ok:true, steps }; }
     hit = hiddenSingle(board, cands);
     if (hit) { steps.push(explainHidden(board, cands, hit)); return { ok:true, steps }; }
   }
   return { ok:false, msg:'当前盘面用已内置的逻辑技巧（唯一候选、唯一位置、裸/隐性数组、区块排除、X-Wing、剑鱼、水母、摩天楼、双线风筝、XY/XYZ-Wing、W-Wing、远程数对、单数链染色、唯一矩形、XY 链）暂时推不出确定的一步。\n建议先把每个空格的候选都标全，再点提示；或者换个区域看看。放心，我不会用猜测或试错来蒙一个答案给你。', steps };
+}
+
+/* 主入口：在内部搜索之上结合玩家已标的候选，避免重复提示——
+   1) 玩家已从候选里划掉的数字，排除步骤不再讲（整步都已做完的直接跳过）
+   2) 玩家已把某格候选锁定为唯一数字时，不再提示那一格，顺着往下找下一步 */
+function getHint(board, userNotes) {
+  const hasNotes = userNotes && userNotes.some(s => s && s.size);
+  if (!hasNotes) return searchHint(board);
+  let work = [...board], result = searchHint(work);
+  for (let guard = 0; guard < 81; guard++) {
+    if (!result.ok || !result.steps.length) return result;
+    const steps = [];
+    for (const st of result.steps) {
+      if (st.digit || !st.elims) { steps.push(st); continue; }
+      const elims = st.elims.filter(e => !(userNotes[e.i] && userNotes[e.i].size && !userNotes[e.i].has(e.d)));
+      if (!elims.length) continue; // 这步要划的候选玩家都已经划掉了
+      steps.push(elims.length === st.elims.length ? st : { tech: st.tech, text: st.text, cells: st.cells, rel: [...new Set(elims.map(e => e.i))], elims });
+    }
+    if (!steps.length) return result;
+    const last = steps[steps.length - 1];
+    const known = last.digit && userNotes[last.cell] && userNotes[last.cell].size === 1 && userNotes[last.cell].has(last.digit);
+    if (!known) return { ok: true, steps };
+    work = [...work]; work[last.cell] = last.digit; // 玩家已解出这格，假装填上找下一步
+    if (work.every(v => v)) return { ok: true, steps }; // 就剩这格没填，还是提示它
+    const next = searchHint(work);
+    if (!next.ok) return { ok: true, steps };
+    result = next;
+  }
+  return result;
 }
 
 function findConflicts(board) {
@@ -668,7 +697,7 @@ function showHintStep() {
 }
 function openHint() {
   if (over) return;
-  const res = getHint(board);
+  const res = getHint(board, notes);
   if (!res.ok) { setStatus(res.msg.split('\n')[0], true); if (res.msg.includes('\n')) alert(res.msg); return; }
   hintSteps = res.steps; hintPos = 0;
   hintTarget = hintSteps[hintSteps.length - 1];
