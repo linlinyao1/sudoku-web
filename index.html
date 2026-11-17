@@ -8,7 +8,7 @@
   :root{
     --ink:#1f2430; --muted:#8a90a3; --line:#c9cdd6; --line-bold:#3a3f4d;
     --bg:#f4f5f9; --card:#fff; --accent:#4f6ef7; --accent-soft:#e3eafe;
-    --peer:#eef1fb; --same:#d3ddff; --error:#e5484d; --error-bg:#fdecec;
+    --peer:#cfdcff; --same:#3f63f2; --error:#e5484d; --error-bg:#fdecec;
     --hint-gold:#ffb020; --hint-bg:#fff3d6; --note:#5b6478;
   }
   *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -62,8 +62,8 @@
   .cell.given{font-weight:700; color:var(--ink)}
   .cell.user{color:var(--accent)}
   .cell.peer{background:var(--peer)}
-  .cell.same{background:var(--same)}
-  .cell.sel{background:var(--accent-soft); box-shadow:inset 0 0 0 2.5px var(--accent); z-index:1}
+  .cell.same{background:var(--same); color:#fff!important; font-weight:800; box-shadow:inset 0 0 0 2px #2b49b8; z-index:1}
+  .cell.sel{background:#ffd166; color:var(--ink)!important; box-shadow:inset 0 0 0 3.5px #f08c00, 0 0 0 1px #f08c00; z-index:2}
   .cell.err{color:var(--error)!important; background:var(--error-bg)}
   .cell.hint-main{background:var(--hint-bg); box-shadow:inset 0 0 0 3px var(--hint-gold); z-index:2}
   .cell.hint-rel{background:#e8f2ff; box-shadow:inset 0 0 0 2px #7db3f5; z-index:1}
@@ -73,6 +73,7 @@
     width:100%; height:100%; padding:2px;
   }
   .notes span{display:flex; align-items:center; justify-content:center; font-size:clamp(8px,2.6vw,12px); color:var(--note); line-height:1}
+  .notes span.hit{background:var(--same); color:#fff; font-weight:800; border-radius:4px}
   .flash{animation:flash .5s}
   @keyframes flash{0%{background:var(--hint-bg)}100%{}}
 
@@ -92,6 +93,8 @@
   .key:active{transform:scale(.94); background:var(--accent-soft)}
   .key.done{opacity:.28; pointer-events:none}
   .fill-key{height:58px; color:var(--accent)}
+  .fill-key.active{background:var(--same); color:#fff; box-shadow:inset 0 0 0 2px #2b49b8}
+  .fill-key.active .left{color:#dbe4ff}
   .fill-key .n{font-size:24px; font-weight:600; line-height:1.05}
   .fill-key .left{font-size:9.5px; color:var(--muted)}
   .note-key{height:46px; color:var(--note); border-style:dashed}
@@ -149,6 +152,7 @@
       <button data-d="easy" class="on">简单</button>
       <button data-d="medium">中等</button>
       <button data-d="hard">困难</button>
+      <button data-d="master">大师</button>
     </div>
     <button class="btn" id="newBtn">新局</button>
   </div>
@@ -260,21 +264,29 @@ function countSolutions(b, limit = 2) {
   return cnt;
 }
 
-const GIVENS = { easy: 40, medium: 31, hard: 25 };
+const GIVENS = { easy: 40, medium: 31, hard: 25, master: 22 };
 function genPuzzle(diff) {
-  let fallback = null;
-  for (let attempt = 0; attempt < 30; attempt++) {
+  let fallback = null, best = null, bestLeft = 99;
+  const master = diff === 'master', target = master ? 17 : GIVENS[diff]; // 大师：删到删无可删，再挑提示最少的
+  for (let attempt = 0; attempt < (master ? 6 : 30); attempt++) {
     const sol = genSolution(), b = [...sol];
     fallback = b;
-    let left = 81;
-    for (const i of shuffled([...Array(81).keys()])) {
-      if (left <= GIVENS[diff]) break;
-      const bak = b[i]; b[i] = 0;
-      if (countSolutions([...b]) !== 1) b[i] = bak; else left--;
+    let left = 81, progress = true;
+    while (left > target && progress) { // 多趟删除：一趟删不动的，换个顺序再试
+      progress = false;
+      for (const i of shuffled([...Array(81).keys()])) {
+        if (left <= target) break;
+        if (!b[i]) continue;
+        const bak = b[i]; b[i] = 0;
+        if (countSolutions([...b]) !== 1) b[i] = bak; else { left--; progress = true; }
+      }
     }
-    if (isLogicallySolvable(b)) return b; // 保证提示引擎全程推得出下一步
+    if (!isLogicallySolvable(b)) continue; // 保证提示引擎全程推得出下一步
+    if (!master) return b;
+    if (left < bestLeft) { best = b; bestLeft = left; }
+    if (left <= GIVENS.master) break;
   }
-  return fallback;
+  return best || fallback;
 }
 // 只用提示引擎的逻辑技巧能否一路解完（getHint 定义在下方，函数声明会提升）
 function isLogicallySolvable(puzzle) {
@@ -503,7 +515,7 @@ function render() {
     if (board[i]) el.textContent = board[i];
     else if (notes[i].size) {
       const g = document.createElement('div'); g.className = 'notes';
-      for (let d = 1; d <= 9; d++) { const s = document.createElement('span'); s.textContent = notes[i].has(d) ? d : ''; g.appendChild(s); }
+      for (let d = 1; d <= 9; d++) { const s = document.createElement('span'); s.textContent = notes[i].has(d) ? d : ''; if (selVal && d === selVal && notes[i].has(d)) s.className = 'hit'; g.appendChild(s); }
       el.appendChild(g);
     }
     el.addEventListener('click', () => { sel = i; render(); });
@@ -514,6 +526,7 @@ function render() {
     const d = +k.dataset.d, left = 9 - board.filter(v => v === d).length;
     k.querySelector('.left').textContent = left > 0 ? `剩 ${left}` : '已填满';
     k.classList.toggle('done', left <= 0);
+    k.classList.toggle('active', selVal === d);
   });
 }
 
@@ -528,7 +541,7 @@ function afterMove() {
   if (conflicts.size) { setStatus('有重复数字冲突，已标红，改掉它们再继续', true); return; }
   if (board.every(v => v)) {
     over = true; clearInterval(timerId);
-    $('winText').textContent = `难度：${{easy:'简单',medium:'中等',hard:'困难'}[diff]} · 用时 ${$('timer').textContent}`;
+    $('winText').textContent = `难度：${{easy:'简单',medium:'中等',hard:'困难',master:'大师'}[diff]} · 用时 ${$('timer').textContent}`;
     $('win').classList.add('show');
   } else setStatus('点选一个格子，再点下方数字填入');
 }
