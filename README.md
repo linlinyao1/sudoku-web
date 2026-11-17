@@ -1,5 +1,7 @@
 # 数独大师 Sudoku
 
+**在线玩：https://linlinyao1.github.io/sudoku-web/**
+
 一个纯静态网页数独游戏，手机和电脑都能玩：`index.html` + `app.js`，无框架、无构建、无联网。
 
 ## 玩法
